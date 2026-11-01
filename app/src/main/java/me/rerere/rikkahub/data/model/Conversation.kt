@@ -53,9 +53,7 @@ data class Conversation(
      */
     val currentMessages
         get(): List<UIMessage> {
-            // 被压缩摘要覆盖的节点已标记 hidden，不再进入请求；节点本身仍留在对话里可回溯
             return messageNodes.map { node -> node.messages[node.selectIndex] }
-                .filterNot { message -> message.isContextHidden }
         }
 
     fun getMessageNodeByMessage(message: UIMessage): MessageNode? {
@@ -189,30 +187,6 @@ internal fun Conversation.replacePrefixWithSummaries(
     if (index == -1) return null
     val summaryNodes = summaries.map { UIMessage.user(it).copy(isContextCheckpoint = true).toMessageNode() }
     return copy(messageNodes = summaryNodes + messageNodes.subList(index + 1, messageNodes.size))
-}
-
-/**
- * 把 [throughNodeId] 及其之前的节点**标记**为已压缩，并在其后插入摘要节点。
- *
- * 与 [replacePrefixWithSummaries] 的差别是历史不再被删掉：节点仍留在对话里（可回溯、
- * 可导出），只是 [Conversation.currentMessages] 会过滤掉它们，不再发给模型。
- * [throughNodeId] 已不存在时返回 null。
- */
-internal fun Conversation.hidePrefixWithSummaries(
-    throughNodeId: Uuid,
-    summaries: List<String>,
-): Conversation? {
-    val index = messageNodes.indexOfFirst { it.id == throughNodeId }
-    if (index == -1) return null
-    val hiddenPrefix = messageNodes.take(index + 1).map { node ->
-        node.copy(
-            messages = node.messages.map { message ->
-                if (message.isContextHidden) message else message.copy(isContextHidden = true)
-            },
-        )
-    }
-    val summaryNodes = summaries.map { UIMessage.user(it).copy(isContextCheckpoint = true).toMessageNode() }
-    return copy(messageNodes = hiddenPrefix + summaryNodes + messageNodes.drop(index + 1))
 }
 
 /** 有工具调用在等待用户审批：这一轮还没结束，排队的消息要等审批完成后再发 */
