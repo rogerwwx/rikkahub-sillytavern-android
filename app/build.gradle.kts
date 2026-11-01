@@ -28,17 +28,9 @@ fun nativeToolchainVersion(key: String): String =
 val nativeNdkVersion = nativeToolchainVersion("rikkahub.ndkVersion")
 val nativeCmakeVersion = nativeToolchainVersion("rikkahub.cmakeVersion")
 
-/**
- * libhdguard.so 内置的派生因子。
- *
- * 它与由签名口令推导出的 kdfFactor 必须一致——native 侧按这个值分段异或存放。
- * 不一致说明签名口令变了或 hdguard.c 未同步，此时构建立即失败，
- * 而不是产出一个「装上去才发现解不开插件」的包。
- *
- * 该常量只参与构建期校验，不会写入 APK。
- */
-val HD_GUARD_EXPECTED_FACTOR =
-    "cc655f7608689bb5fe6003d206f8e38731c2cc0cbade823a83194c58b46efb12"
+// hdguard 的因子此前在构建期与 HD_GUARD_EXPECTED_FACTOR 比对，口令一变就中断构建。
+// 自改分支不需要这道门（debug 签名 + 自身口令本来就对不上），已整体移除；
+// 运行时的证书摘要校验仍在 native 侧，需要连它一起关掉时用 -Phdguard.skipCert=on。
 
 plugins {
     alias(libs.plugins.android.application)
@@ -201,61 +193,10 @@ android {
         versionCode = 241
         versionName = "3.1.1"
 
-        // 插件解密密钥的派生因子之一：由签名口令做 HMAC，口令只存在于
-        // local.properties / CI secrets，不写入 APK 明文。APK 内只保留 HMAC 结果，
-        // 缺少口令则无法反推出原始密钥材料。
-        val kdfProps = Properties().apply {
-            val f = rootProject.file("local.properties")
-            if (f.exists()) f.inputStream().use { load(it) }
-        }
-        val signSecret = kdfProps.getProperty("keyPassword")
-            ?: kdfProps.getProperty("storePassword")
-            ?: ""
-        val kdfFactor = if (signSecret.isEmpty()) {
-            // 未配置签名口令（如 CI 未注入 secrets）：退化为占位值。
-            // 该分支构建出的包无法解密证书派生的插件，属预期行为。
-            logger.warn(
-                "[华灯] PLUGIN_KDF_FACTOR 降级为占位值：local.properties 缺少 " +
-                "keyPassword/storePassword，本次构建的 APK 无法解密 v2 加密插件。"
-            )
-            "NO_SIGNING_SECRET"
-        } else {
-            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
-            mac.init(javax.crypto.spec.SecretKeySpec(
-                "hd.plugin.kdf.factor".toByteArray(), "HmacSHA256"))
-            mac.doFinal(signSecret.toByteArray()).joinToString("") { "%02x".format(it) }
-        }
-        // 注意：PLUGIN_KDF_FACTOR 不再写入 BuildConfig。
-        //
-        // 该常量会被编译成 dex 里的字符串字面量，任何 strings | grep 都能取出，
-        // 配合公开的签名证书即可完整复现密钥派生、解开插件载荷。
-        // 因子现由 libhdguard.so 在运行时供给（见 app/src/main/cpp/hdguard.c），
-        // 上面算出的 kdfFactor 仍用于校验 native 侧数据的一致性，但不进入 APK。
-        // 校验只在「真口令」下执行。CI 没注入 secrets 时写的是占位口令（android），
-        // 这种包本来就解不开 v2 插件（还会用 debug key 签名），让它失败只会卡住所有 fork。
-        // 需要强制：-Phdguard.check=on；明确跳过：-Phdguard.check=off。
-        val hdGuardMode = (providers.gradleProperty("hdguard.check").orNull
-            ?: System.getenv("HDGUARD_CHECK") ?: "auto").lowercase()
-        val hdGuardHasRealSecret = signSecret.isNotEmpty() && signSecret != "android"
-        val hdGuardEnforced = when (hdGuardMode) {
-            "on", "true", "1" -> true
-            "off", "false", "0" -> false
-            else -> hdGuardHasRealSecret
-        }
-        if (hdGuardEnforced) {
-            check(kdfFactor == HD_GUARD_EXPECTED_FACTOR) {
-                "[华灯] 签名口令推导出的因子与 libhdguard.so 内置值不一致（本次推导 $kdfFactor）。" +
-                    "两者必须相同，否则 APK 无法解密 v2 插件。" +
-                    "请按该因子重新生成 hdguard.c 的 BLOB，或检查 local.properties 的签名口令。" +
-                    "只想先出包可以加 -Phdguard.check=off。"
-            }
-        } else {
-            logger.warn(
-                "[华灯] 跳过 hdguard 因子校验（模式=" + hdGuardMode +
-                    "，口令=" + (if (signSecret.isEmpty()) "缺失" else "占位") +
-                    "）：本次产物解密不了 v2 插件，属预期。"
-            )
-        }
+        // 这里原先按签名口令算 HMAC 并与 native 的 HD_GUARD_EXPECTED_FACTOR 比对，
+        // 不一致就中断构建。自改分支里它是纯粹的摩擦：口令来自 local.properties，
+        // CI 用占位口令、本机可能三天一换，校验只会挡住出包。
+        // 已移除整段推导与 check()，因子只由 libhdguard.so 在运行时提供。
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -270,6 +211,14 @@ android {
             cmake {
                 // hdguard：插件密钥派生因子的运行时供给，不依赖第三方库
                 arguments += listOf("-DANDROID_STL=none")
+                // 本机自改包常用 debug 签名或核心破解安装，证书摘要必然对不上，
+                // 此时加 -Phdguard.skipCert=on（或 gradle.properties 写
+                // hdguard.skipCert=true）编译期去掉 native 侧校验，插件才能解密。
+                val hdSkipCert = (providers.gradleProperty("hdguard.skipCert").orNull
+                    ?: System.getenv("HDGUARD_SKIP_CERT") ?: "false").lowercase()
+                if (hdSkipCert == "on" || hdSkipCert == "true" || hdSkipCert == "1") {
+                    arguments += listOf("-DHD_GUARD_SKIP_CERT=ON")
+                }
                 cFlags += listOf("-O2", "-fvisibility=hidden", "-fno-stack-protector")
             }
         }

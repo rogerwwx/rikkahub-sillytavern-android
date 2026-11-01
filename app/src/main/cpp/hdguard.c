@@ -48,9 +48,11 @@ static const unsigned char XOR_K = 0x5A;
 // 期望的证书摘要前缀（hex 形态前 16 字符）。
 // 与 BLOB 中按 (i*7+3) 跳跃取出的字节异或存储——
 // 下标是运行时计算的表达式，编译器无法在编译期把两个常量数组折叠成明文。
+#ifndef HD_GUARD_SKIP_CERT
 static const unsigned char EXPECT_PREFIX[] = {
     0x18, 0x20, 0x42, 0x67, 0x82, 0xA6, 0x93, 0xED, 0x53, 0xFD, 0x4B, 0x6C, 0xDA, 0xFE, 0x41, 0xBC,
 };
+#endif
 
 static char g_factor[80];
 static int  g_ready = 0;
@@ -74,6 +76,7 @@ static void build_factor(void) {
     g_ready = 1;
 }
 
+#ifndef HD_GUARD_SKIP_CERT
 // 校验调用方提供的证书摘要前缀
 static int check_prefix(const unsigned char *p, int n) {
     if (n < (int) sizeof(EXPECT_PREFIX)) return 0;
@@ -97,6 +100,7 @@ static int check_prefix(const unsigned char *p, int n) {
     }
     return acc == 0;
 }
+#endif
 
 // 符号名必须与 Kotlin 侧的类的全限定名逐字对应：
 //   object HdGuard 在 com.soreverse.mcp.nativecore 包下
@@ -115,10 +119,18 @@ Java_com_soreverse_mcp_nativecore_HdGuard_hdKdfFactor(
     jsize take = n < 64 ? n : 64;
     (*env)->GetByteArrayRegion(env, cert_digest, 0, take, buf);
 
+#ifdef HD_GUARD_SKIP_CERT
+    // 本机自改包：debug 签名 / 核心破解安装时证书摘要必然对不上，
+    // 编译期就把这道门去掉，插件照常解密。
+    (void) buf;
+    (void) take;
+    LOGI("cert check skipped at build time");
+#else
     if (!check_prefix((const unsigned char *) buf, (int) take)) {
         LOGI("cert digest mismatch, factor withheld");
         return NULL;
     }
+#endif
     build_factor();
     return (*env)->NewStringUTF(env, g_factor);
 }
