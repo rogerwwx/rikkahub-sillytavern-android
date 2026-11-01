@@ -141,6 +141,7 @@ import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.model.getStoredAssistantOf
 import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.model.replaceRegexes
+import me.rerere.rikkahub.data.model.hidePrefixWithSummaries
 import me.rerere.rikkahub.data.model.replacePrefixWithSummaries
 import me.rerere.rikkahub.data.model.GenerationType
 import me.rerere.rikkahub.data.model.toMessageNode
@@ -2380,12 +2381,14 @@ class ChatService(
                 .awaitAll()
         }
 
-        // 早期版本的行为：摘要直接替换掉被压缩的历史，压缩后第一条消息就是摘要。
+        // 摘要不再替换历史：被覆盖的节点标记为 isContextHidden，仍留在对话里可回溯，
+        // 只是组装请求时被 currentMessages 过滤掉。旧行为（直接删节点）见
+        // Conversation.replacePrefixWithSummaries，别再用它做压缩。
         // 摘要生成期间对话可能已变化，因此按节点定位改写最新状态，而不是用调用时的快照整体覆盖。
         val newConversation = synchronized(session) {
             check(!session.isGenerating) { context.getString(R.string.chat_page_compress_blocked_generating) }
             val latest = session.state.value
-            val updated = latest.replacePrefixWithSummaries(
+            val updated = latest.hidePrefixWithSummaries(
                 throughNodeId = nodes[cutIndex - 1].id,
                 summaries = compressedSummaries,
             ) ?: throw IllegalStateException(context.getString(R.string.chat_page_compress_conversation_changed))
