@@ -60,7 +60,11 @@ data class MemoryFile(
     companion object {
         const val PROFILE_PATH = "/profile.md"
         const val PREFERENCES_PATH = "/preferences.md"
+        const val CHARACTER_PATH = "/character.md"
         const val MAX_BYTES = 48 * 1024
+
+        /** 每轮全文注入的文件，顺序就是注入顺序 */
+        val PINNED_PATHS = listOf(PROFILE_PATH, PREFERENCES_PATH, CHARACTER_PATH)
         private const val MAX_PATH_LENGTH = 128
 
         /** 规范化模型或用户给出的路径，不合法时返回 null */
@@ -84,8 +88,7 @@ private fun String.toSingleLine(): String = replace(Regex("\\s+"), " ").trim()
 // 列表项开头的 [stated] 标记，保留前面的列表符号
 private val statedMarkerRegex = Regex("""(?m)^(\s*[-*+]\s+)\[stated\]\s*""", RegexOption.IGNORE_CASE)
 
-// 每次都全文注入的两个文件排在最前，其余目录按记忆格式约定的顺序
-private val pinnedPathOrder = listOf(MemoryFile.PROFILE_PATH, MemoryFile.PREFERENCES_PATH)
+// 每次都全文注入的文件排在最前，其余目录按记忆格式约定的顺序
 private val directoryOrder = listOf("/", "/topics", "/areas", "/people")
 
 private fun <T> List<T>.orderOf(item: T) = indexOf(item).let { if (it < 0) size else it }
@@ -98,7 +101,7 @@ fun memoryTitleOf(name: String): String =
 
 /** 按目录分组，用于在界面上展示 */
 fun List<MemoryFile>.groupByDirectory(): List<Pair<String, List<MemoryFile>>> =
-    sortedWith(compareBy({ pinnedPathOrder.orderOf(it.path) }, { it.path }))
+    sortedWith(compareBy({ MemoryFile.PINNED_PATHS.orderOf(it.path) }, { it.path }))
         .groupBy { it.directory }
         .toList()
         .sortedWith(compareBy({ directoryOrder.orderOf(it.first) }, { it.first }))

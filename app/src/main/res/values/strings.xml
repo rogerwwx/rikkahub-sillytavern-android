@@ -3118,7 +3118,7 @@
   <string name="assistant_page_memory_dream_updated">Memory updated: %s</string>
   <string name="assistant_page_memory_dream_removed">removed %s</string>
   <string name="assistant_page_memory_updated_at">Updated %s</string>
-  <string name="assistant_page_memory_section_you">You</string>
+  <string name="assistant_page_memory_section_you">Pinned</string>
   <string name="assistant_page_memory_section_topics">Topics</string>
   <string name="assistant_page_memory_section_areas">Areas</string>
   <string name="assistant_page_memory_section_people">People</string>

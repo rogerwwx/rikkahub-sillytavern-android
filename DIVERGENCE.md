@@ -32,6 +32,8 @@
 - **`ui/pages/extensions/skills/*` 保持删除**：本地已把技能页重写到 `ui/pages/extensions/`（`SkillsPage`/`SkillsVM`/`SkillDetailPage`/`SkillDetailVM`），上游对这些文件的改动不回收。本期上游只改了包名 import，同样丢弃。
 - **上游 `OpenAI` 流式容错（240deb5fe）已收**：`ChatCompletionsStreamDecoder` 改用 `me.rerere.common.http.jsonObjectOrNull`/`jsonArrayOrNull`，本地同步改用同一套扩展，不要再引入 `kotlinx.serialization.json.jsonObject` 强转（中转混入 `data: null` 会崩）。
 
+- **记忆库本地多了一个钉住文件 `/character.md`**：`MemoryFile.CHARACTER_PATH` / `MemoryFile.PINNED_PATHS`、`MemoryPrompts.appendMemoryState` 与 `<memory_format>` 的 Layout、The character file 两节都是本地改动。上游改 `MemoryFile.kt`、`MemoryPrompts.kt` 时按「三个钉住文件（profile / preferences / character）+ character 豁免 [stated] 测试」收，别把 character 合并丢了；`values/strings.xml` 的 `assistant_page_memory_section_you` 文本也改成了根目录的统称。
+
 ### 上一轮（2026-10-16）合并的固定约定
 
 - **依赖**：上游删掉了 `sonner` 与 `lucide`。本地全量迁移到上游自研 `me.rerere.ui.toast.Toaster`（`ToasterState` / `ToastType` / `rememberToasterState`），`sonner` 不再引入；`lucide` 本地仍有 5 个页面在用，故在 `gradle/libs.versions.toml` 与 `app/build.gradle.kts` 保留 `lucide-icons`。

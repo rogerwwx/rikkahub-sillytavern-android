@@ -485,7 +485,7 @@ private fun memoryConsolidationSummary(status: MemoryConsolidationStatus): Strin
 // 按整秒显示成 "42s"、"1m 5s"
 private fun durationTextOf(duration: Duration): String = duration.inWholeSeconds.coerceAtLeast(1).seconds.toString()
 
-// 根目录下是 profile 和 preferences，都是关于用户本人的；记忆格式约定的几个目录有译名，其余的从目录名推
+// 根目录下是 profile、preferences 和 character，都会每轮全文注入；记忆格式约定的几个目录有译名，其余的从目录名推
 @Composable
 private fun memorySectionTitle(directory: String): String = when (directory) {
     "/" -> stringResource(R.string.assistant_page_memory_section_you)
