@@ -86,7 +86,7 @@ import me.rerere.rikkahub.utils.plus
 import me.rerere.ui.easteregg.EmojiBurstHost
 
 // 本站仓库与自制官网；上游原版仓库按许可标明出处
-private const val GITHUB_REPO_URL = "https://github.com/MiaoWuNYA/rikkahub-sillytavern-android"
+private const val GITHUB_REPO_URL = "https://github.com/rogerwwx/rikkahub-sillytavern-android"
 private const val WEBSITE_URL = "https://rikkahub.luoca.cn"
 private const val UPSTREAM_REPO_URL = "https://github.com/rikkahub/rikkahub"
 

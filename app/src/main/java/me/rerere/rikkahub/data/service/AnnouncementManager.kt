@@ -49,7 +49,7 @@ object AnnouncementManager {
     const val ASSET_IMAGE_PREFIX = "$ASSET_DIR/"
 
     /** 公告与更新检查同仓库同分支，取的是同一个 raw 文件通道。 */
-    private const val REPO = "MiaoWuNYA/rikkahub-sillytavern-android"
+    private const val REPO = "rogerwwx/rikkahub-sillytavern-android"
     private const val BRANCH = "huadeng"
     private const val RAW_URL = "https://raw.githubusercontent.com/$REPO/$BRANCH/announcement.json"
 
