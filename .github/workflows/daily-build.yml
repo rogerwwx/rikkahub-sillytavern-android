@@ -11,7 +11,7 @@ jobs:
   # 检查过去 24 小时内是否有新提交，没有则跳过构建，避免重复打包
   check:
     # 老 fork MiaoWuNYA/rikkahub-plus 已归档，只在新仓库构建
-    if: github.repository == 'MiaoWuNYA/rikkahub-sillytavern-android'
+    if: github.repository == 'rogerwwx/rikkahub-sillytavern-android'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -120,7 +120,7 @@ jobs:
           # 注意 downloads 必须一起重写：这个文件是 GitHub API 拉不通时的兜底源
           # （国内网络很常见），链接写死就会把用户导向过期安装包。
           export REL_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          export REL_REPO="MiaoWuNYA/rikkahub-sillytavern-android"
+          export REL_REPO="rogerwwx/rikkahub-sillytavern-android"
           python3 - <<'PY'
           import json, os, pathlib
           p = pathlib.Path("update.json")
