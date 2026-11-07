@@ -46,6 +46,8 @@ data class UIMessage(
     val mvuData: String? = null,
     // 压缩检查点：此消息是它之前全部历史的摘要，组装请求时从最后一个检查点开始取
     val isContextCheckpoint: Boolean = false,
+    // 已被摘要覆盖的旧消息：留在对话里可回溯，但不再进入请求上下文
+    val isContextHidden: Boolean = false,
     // 请求期间生成的内部消息；该标记仅在内存中使用
     @Transient
     val isSynthetic: Boolean = false,
