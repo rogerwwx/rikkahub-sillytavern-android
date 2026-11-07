@@ -10,10 +10,14 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.sum
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.StreamChunkHandler
+import me.rerere.ai.ui.CompleteStreamGuard
+import me.rerere.ai.ui.StreamCompletion
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.finishReasoning
+import me.rerere.ai.ui.generateTextComplete
 import me.rerere.ai.util.json
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -105,15 +109,17 @@ internal class AgentLoop(
     ): UIMessage {
         // 多轮工具调用共用同一条助手消息，消息上已有的 usage 和耗时来自之前的步骤。
         // 本步从清空的统计开始（merge 只适合同一次请求内的快照），再与之前的步骤累加。
-        val stepStart = base.copy(usage = null, generationTimeMs = null)
+        val stepStart = base.copy(usage = null, generationTimeMs = null, generationCompletion = StreamCompletion.UNKNOWN)
         return try {
             withRetry(request.retry, onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
                 // 每次重试都从本步开始时的消息重新合并，不会把重试的响应接在已经展示的半截回复后面；
                 // 各次尝试共用同一个消息 id，调用方直接覆盖即可。
                 val handler = StreamChunkHandler(params.model)
+                val guard = if (request.requireCompleteResponse) CompleteStreamGuard() else null
                 var attempt = stepStart
                 var firstChunk: TimeMark? = null
                 request.provider.streamText(request.providerSetting, messages, params).collect { chunk ->
+                    guard?.accept(chunk)
                     try {
                         val mark = firstChunk ?: TimeSource.Monotonic.markNow().also { firstChunk = it }
                         attempt = handler.handle(listOf(attempt), chunk).single()
@@ -125,6 +131,7 @@ internal class AgentLoop(
                         throw StreamChunkHandlingException(e)
                     }
                 }
+                guard?.requireComplete()
                 attempt.withStepStats(base, firstChunk?.elapsedNow() ?: Duration.ZERO)
             }
         } catch (e: StreamChunkHandlingException) {
@@ -141,7 +148,9 @@ internal class AgentLoop(
         var requestMark = TimeSource.Monotonic.markNow()
         val result = withRetry(request.retry, onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
             requestMark = TimeSource.Monotonic.markNow()
-            request.provider.generateText(request.providerSetting, messages, params)
+            if (request.requireCompleteResponse) {
+                request.provider.generateTextComplete(request.providerSetting, messages, params, stream = false)
+            } else request.provider.generateText(request.providerSetting, messages, params)
         }
         val requestTime = requestMark.elapsedNow()
         // 和流式一样只追加 part，不并进之前步骤的文本或推理里，否则 newPartsFrom 之后就不全是这一步的内容了。
@@ -151,6 +160,10 @@ internal class AgentLoop(
             annotations = result.message.annotations.ifEmpty { base.annotations },
             modelId = params.model.id,
             usage = result.usage,
+            generationCompletion = if (result.finishReason.equals("requires_action", ignoreCase = true) && result.message.getTools().isEmpty()) {
+                StreamCompletion.UNKNOWN
+            } else result.message.generationCompletion
+                ?: protocolCompletion(result.finishReason, hasToolCalls = result.message.getTools().isNotEmpty()),
         ).finishReasoning().withStepStats(base, requestTime)
         preview(generated, newPartsFrom = base.parts.size)
         return generated

@@ -46,7 +46,7 @@ import kotlin.time.Clock
  * TextStart(id) -> TextDelta(id, ...) -> TextDelta(id, ...) -> TextEnd(id) -> Finish
  * ```
  *
- * [StreamChunk.Finish] 只代表响应流正常结束，并不保证一定到达。网络错误、协议解析失败或上层取消
+ * [StreamChunk.Finish] 结束当前预览；严格后台消费者另外检查 completion。网络错误、协议解析失败或上层取消
  * Flow 时，流可能直接异常结束。此时已经合并的内容仍然保留，但消息的 `finishedAt` 可能为空，尚未
  * 收到 `ReasoningEnd` 的推理 part 也不会由本类自动结束。调用方应在 Flow 的完成或异常处理中执行
  * 必要的 UI 收尾，并丢弃当前 handler；不要将它复用于下一条响应流。
@@ -60,6 +60,7 @@ class StreamChunkHandler(private val model: Model? = null) {
     private val reasoningPartIndexes = mutableMapOf<String, Int>()
     private val imagePartIndexes = mutableMapOf<String, Int>()
     private val serverToolInputBuffers = mutableMapOf<String, StringBuilder>()
+    private var hasClientToolCalls = false
 
     /**
      * 将一个 [chunk] 合并进消息列表末尾的助手消息，并返回新的消息列表。
@@ -163,6 +164,7 @@ class StreamChunkHandler(private val model: Model? = null) {
             }
 
             is StreamChunk.ToolCallStart -> {
+                hasClientToolCalls = true
                 if (parts.any { it is UIMessagePart.Tool && it.toolCallId == chunk.id }) {
                     this
                 } else {
@@ -316,13 +318,17 @@ class StreamChunkHandler(private val model: Model? = null) {
             is StreamChunk.Annotations -> copy(annotations = (annotations + chunk.annotations).distinct())
             is StreamChunk.Usage -> copy(usage = usage.merge(chunk.usage))
             is StreamChunk.Finish -> copy(
-                finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+                finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()),
+                generationCompletion = if (chunk.finishReason.equals("requires_action", ignoreCase = true) && !hasClientToolCalls) {
+                    StreamCompletion.UNKNOWN
+                } else chunk.completion,
             ).finishReasoning().also {
                 // Finish 同时结束尚未显式结束的 reasoning，并释放本次响应流的索引状态。
                 textPartIndexes.clear()
                 reasoningPartIndexes.clear()
                 imagePartIndexes.clear()
                 serverToolInputBuffers.clear()
+                hasClientToolCalls = false
             }
         }
     }
@@ -350,10 +356,16 @@ fun List<UIMessage>.handleTextGenerationResult(
     model: Model? = null,
 ): List<UIMessage> {
     require(isNotEmpty()) { "messages must not be empty" }
+    val hasToolCalls = result.message.getTools().isNotEmpty()
+    val completion = protocolCompletion(result.finishReason, hasToolCalls).let { protocol ->
+        if (result.finishReason.equals("requires_action", ignoreCase = true) && !hasToolCalls) StreamCompletion.UNKNOWN
+        else if (protocol == StreamCompletion.UNKNOWN) result.message.generationCompletion ?: protocol else protocol
+    }
     val incoming = result.message.copy(
         modelId = model?.id,
         usage = result.usage,
         finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()),
+        generationCompletion = completion,
     ).finishReasoning()
     return if (last().role != incoming.role) {
         this + incoming
@@ -362,6 +374,7 @@ fun List<UIMessage>.handleTextGenerationResult(
             modelId = model?.id ?: last().modelId,
             usage = last().usage.merge(result.usage ?: TokenUsage()),
             finishedAt = incoming.finishedAt,
+            generationCompletion = incoming.generationCompletion,
         ).finishReasoning()
     }
 }

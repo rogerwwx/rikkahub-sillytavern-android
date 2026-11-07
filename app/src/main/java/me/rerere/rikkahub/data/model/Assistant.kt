@@ -39,12 +39,16 @@ data class Assistant(
     // 上下文消息条数上限, 超出后阶梯式截断; 0 表示不限制
     val contextMessageLimit: Int = 0,
     val streamOutput: Boolean = true,
+    // 压缩和记忆处理独立于聊天输出；两种请求方式都要求完整结果后提交。
+    val compressionMemoryStream: Boolean = true,
     // 防空回复（针对 Gemini）：系统提示词移入对话流 + 空回复自动微扰重试
     val enableAntiEmptyResponse: Boolean = false,
     // 中转站兼容：修复 Gemini 经 OpenAI 兼容中转时 reasoning
     val enableProxyFix: Boolean = false,
     // 记忆功能默认开启：记忆让 AI 更了解用户
     val enableMemory: Boolean = true,
+    val semanticMemory: me.rerere.rikkahub.data.memory.semantic.SemanticMemorySettings =
+        me.rerere.rikkahub.data.memory.semantic.SemanticMemorySettings(),
     val useGlobalMemory: Boolean = false, // 使用全局共享记忆而非助手隔离记忆
     // 上下文滚动压缩：达到阈值后自动把早期对话压缩为摘要（保留原文，仅请求时替换前缀）
     // 默认关闭：入口已从设置里移除，无法再关闭，故对所有助手统一停用。

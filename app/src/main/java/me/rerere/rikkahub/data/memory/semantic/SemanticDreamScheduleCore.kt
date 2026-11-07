@@ -1,0 +1,34 @@
+package me.rerere.rikkahub.data.memory.semantic
+
+import kotlinx.serialization.Serializable
+
+/** 调度状态只保存触发器，不复制做梦来源/草稿；dream_run 是实际任务进度。 */
+@Serializable
+data class SemanticDreamScheduleState(
+    val assistantId: String,
+    val configurationHash: String,
+    val turnKey: String,
+    val dueAt: Long,
+    val attempts: Int = 0,
+    val status: String = "pending",
+    val lastCompletedAt: Long = 0,
+    val error: String? = null,
+) {
+    fun rescheduled(hash: String, newTurnKey: String, now: Long, delayMillis: Long, manual: Boolean = false): SemanticDreamScheduleState {
+        if (!manual && hash == configurationHash && newTurnKey == turnKey) return this
+        return copy(configurationHash = hash, turnKey = newTurnKey, dueAt = now + delayMillis.coerceAtLeast(0),
+            attempts = 0, status = "pending", error = null)
+    }
+
+    fun afterRun(runStatus: String, now: Long, config: SemanticDreamSettings, failure: String?): SemanticDreamScheduleState = when (runStatus) {
+        "completed" -> copy(status = "completed", attempts = 0, lastCompletedAt = now, error = null)
+        "cancelled" -> copy(status = "cancelled", error = "做梦已取消")
+        "pending" -> copy(status = "pending", dueAt = now + config.retryBackoffSeconds * 1000L, error = null)
+        else -> {
+            val failures = attempts + 1
+            copy(status = if (failures > config.retryLimit) "failed" else "pending", attempts = failures,
+                dueAt = now + (config.retryBackoffSeconds * 1000L * (1L shl (failures - 1).coerceIn(0, 5))).coerceAtMost(3_600_000L),
+                error = failure ?: "做梦失败，来源窗口已保留")
+        }
+    }
+}

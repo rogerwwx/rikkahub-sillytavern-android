@@ -23,6 +23,8 @@ data class AgentRequest(
     /** 最多请求模型的次数 */
     val maxSteps: Int = 256,
     val retry: RetryPolicy = RetryPolicy.NONE,
+    /** 后台写入必须验证协议完成；普通聊天继续保留预览容错。 */
+    val requireCompleteResponse: Boolean = false,
 )
 
 /** 调用方在循环各个节点上的介入点 */

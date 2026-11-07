@@ -92,6 +92,7 @@ internal fun Settings.withoutInvalidReferences(): Settings {
                 }.toSet(),
                 // 上下文滚动压缩入口已移除，无法再手动关闭，对所有助手统一停用
                 enableRollingContextCompression = false,
+                semanticMemory = assistant.semanticMemory.normalized(),
                 // 自动压缩已停用：宁可超出模型上限，也不在用户不知情时改写对话历史
                 enableAutoCompact = false,
                 // 跨窗口近期记忆（允许助手读取近期生活流）入口已移除，统一停用

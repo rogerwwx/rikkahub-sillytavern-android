@@ -59,4 +59,27 @@ class UIMessageSerializationTest {
 
         assertNull(Json.decodeFromString<UIMessage>(legacy).snapshotModel())
     }
+
+    @Test
+    fun `all generation completion states survive message serialization`() {
+        val storageJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+        StreamCompletion.entries.forEach { completion ->
+            val message = UIMessage.assistant("response").copy(generationCompletion = completion)
+            val encoded = storageJson.encodeToString(listOf(message))
+            val decoded = storageJson.decodeFromString<List<UIMessage>>(encoded).single()
+
+            assertTrue(encoded.contains("\"generationCompletion\":\"${completion.name}\""))
+            assertEquals(completion, decoded.generationCompletion)
+            assertEquals(message, decoded)
+        }
+    }
+
+    @Test
+    fun `legacy messages without generation completion retain null`() {
+        val legacy = """{"role":"assistant","parts":[{"type":"text","text":"legacy"}]}"""
+        val message = Json.decodeFromString<UIMessage>(legacy)
+
+        assertNull(message.generationCompletion)
+        assertNull(Json.decodeFromString<UIMessage>(Json.encodeToString(message)).generationCompletion)
+    }
 }

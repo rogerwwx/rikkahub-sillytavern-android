@@ -14,6 +14,8 @@ import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.StreamCompletion
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.json
 import me.rerere.ai.util.parseErrorDetail
@@ -58,7 +60,8 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
                     }
                     else -> null
                 }
-                blocks[index] = ClaudeStreamBlock(kind, blockId, metadata)
+                blocks[index] = ClaudeStreamBlock(kind, blockId, metadata,
+                    initialInput = if (kind == "tool_use") contentBlock["input"]?.jsonObject?.toString() else null)
                 when (kind) {
                     "text" -> add(StreamChunk.TextStart(blockId))
                     "thinking", "redacted_thinking" -> add(StreamChunk.ReasoningStart(blockId, metadata))
@@ -69,6 +72,7 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
                         ))
                         val input = contentBlock["input"]?.jsonObject
                         if (input != null && input.isNotEmpty()) {
+                            blocks.getValue(index).hasInput = true
                             add(StreamChunk.ToolCallDelta(
                                 id = blockId,
                                 inputDelta = json.encodeToString(input),
@@ -131,6 +135,7 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
                         if (block.kind.isClaudeServerToolUseType()) {
                             add(StreamChunk.ServerToolInputDelta(block.id, partialJson))
                         } else {
+                            if (partialJson.isNotEmpty()) block.hasInput = true
                             add(StreamChunk.ToolCallDelta(id = block.id, inputDelta = partialJson))
                         }
                     }
@@ -139,12 +144,12 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
 
             if (event.event == "content_block_stop" && index != null) {
                 val block = blocks.remove(index) ?: error("Unknown content block index: $index")
-                endBlock(block)?.let(::add)
+                addAll(endBlock(block))
             }
         }
 
         return if (event.event == "message_stop") {
-            DecodeResult(chunks + finish(), completed = true)
+            DecodeResult(chunks + finish(protocolComplete = true), completed = true)
         } else {
             DecodeResult(chunks)
         }
@@ -152,24 +157,31 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
 
     override fun onClosed(): List<StreamChunk> = finish()
 
-    private fun finish(): List<StreamChunk> {
+    private fun finish(protocolComplete: Boolean = false): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
         return buildList {
-            blocks.values.mapNotNull(::endBlock).forEach(::add)
+            blocks.values.forEach { addAll(endBlock(it)) }
             blocks.clear()
-            add(StreamChunk.Finish(finishReason, responseId, responseModel))
+            add(StreamChunk.Finish(finishReason, responseId, responseModel,
+                if (protocolComplete) protocolCompletion(finishReason) else StreamCompletion.UNKNOWN))
         }
     }
 
-    private fun endBlock(block: ClaudeStreamBlock): StreamChunk? = when (block.kind) {
-        "text" -> StreamChunk.TextEnd(block.id)
-        "thinking", "redacted_thinking" -> StreamChunk.ReasoningEnd(block.id, block.metadata)
-        "tool_use" -> StreamChunk.ToolCallEnd(block.id)
+    private fun endBlock(block: ClaudeStreamBlock): List<StreamChunk> = when (block.kind) {
+        "text" -> listOf(StreamChunk.TextEnd(block.id))
+        "thinking", "redacted_thinking" -> listOf(StreamChunk.ReasoningEnd(block.id, block.metadata))
+        "tool_use" -> buildList {
+            // 完整空对象是合法的无参数调用；缺失输入或半截 delta 不补成 {}。
+            if (!block.hasInput && block.initialInput != null) {
+                add(StreamChunk.ToolCallDelta(block.id, inputDelta = block.initialInput))
+            }
+            add(StreamChunk.ToolCallEnd(block.id))
+        }
         else -> if (block.kind.isClaudeServerToolUseType()) {
-            StreamChunk.ServerToolInputEnd(block.id)
+            listOf(StreamChunk.ServerToolInputEnd(block.id))
         } else {
-            null
+            emptyList()
         }
     }
 
@@ -194,5 +206,7 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
         val kind: String,
         val id: String,
         val metadata: JsonObject? = null,
+        val initialInput: String? = null,
+        var hasInput: Boolean = false,
     )
 }

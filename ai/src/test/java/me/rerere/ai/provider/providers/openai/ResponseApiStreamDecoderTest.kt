@@ -15,6 +15,7 @@ import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.StreamChunkHandler
+import me.rerere.ai.ui.StreamCompletion
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
@@ -66,6 +67,7 @@ class ResponseApiStreamDecoderTest {
                 finishReason = "incomplete:max_output_tokens",
                 responseId = "resp_incomplete",
                 model = "test-model",
+                completion = StreamCompletion.TRUNCATED,
             ),
             result.chunks[1],
         )

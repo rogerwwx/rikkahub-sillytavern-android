@@ -92,7 +92,7 @@ fun SettingJevPage(vm: SettingVM = koinViewModel()) {
         apiKey.trim() != huaDeng.jevApiKey ||
         model.trim().ifEmpty { JEV_DEFAULT_MODEL } != huaDeng.jevModel
     val configured = huaDeng.jevApiKey.isNotBlank() && huaDeng.jevBaseUrl.isValidHttpUrl()
-    val anyTakeover = huaDeng.jevTakeoverMemory || huaDeng.jevJudgeTool
+    val anyTakeover = huaDeng.jevJudgeTool
     // 第三方中转/自建代理要照着这个填，所以显示拼好的完整端点而不是只给个域名
     val endpoint = remember(baseUrl) { resolveJevEndpoint(baseUrl) }
 
@@ -306,14 +306,6 @@ fun SettingJevPage(vm: SettingVM = koinViewModel()) {
                     item(
                         headlineContent = { Text(stringResource(R.string.setting_page_jev_memory)) },
                         supportingContent = { Text(stringResource(R.string.setting_page_jev_memory_desc)) },
-                        trailingContent = {
-                            Switch(
-                                checked = huaDeng.jevTakeoverMemory,
-                                onCheckedChange = { enabled ->
-                                    updateHuaDeng(huaDeng.copy(jevTakeoverMemory = enabled))
-                                },
-                            )
-                        },
                     )
                     item(
                         headlineContent = { Text(stringResource(R.string.setting_page_jev_tool)) },

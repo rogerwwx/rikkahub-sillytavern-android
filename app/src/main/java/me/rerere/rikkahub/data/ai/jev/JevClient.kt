@@ -1,17 +1,30 @@
 package me.rerere.rikkahub.data.ai.jev
 
 import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import me.rerere.rikkahub.utils.l10n
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import java.security.MessageDigest
 
 private const val TAG = "JevClient"
 
@@ -29,28 +42,15 @@ private val JevJson = Json {
  * 判不出来或者调不通的时候必须静默回退，不能影响对话，也不能弹错误。
  */
 sealed interface JevResult<out T> {
-    /** 判出来了，且置信度达标 */
+    /** 按回答类型校验，且该类型的业务门槛达标 */
     data class Ok<T>(val value: T) : JevResult<T>
 
-    /** 判出来了但置信度低于阈值，交给调用方自己决定要不要当 Ok 用 */
-    data class Uncertain(val confidence: Double?, val fallback: Double) : JevResult<Nothing>
+    /** 按回答类型仍不确定；certainty是本次使用的分布指标，不统一当作官方confidence。 */
+    data class Uncertain(val certainty: Double?, val fallback: Double) : JevResult<Nothing>
 
     /** 没配置、网络失败、解析失败、鉴权失败……一律归到这里 */
     data class Failed(val reason: String) : JevResult<Nothing>
 }
-
-/**
- * 单条判断结果，无论哪种 question 类型的统一视图。
- * confidence 为 null 表示该类型本身不提供（noul）。
- */
-data class JevVerdict(
-    val type: String,
-    val choice: String?,
-    val score: Double?,
-    val noul: Double?,
-    val confidence: Double?,
-    val probabilities: Map<String, Double>,
-)
 
 /**
  * Jev（TypeSafe System One Model）客户端。
@@ -86,6 +86,11 @@ class JevClient(
     /** 设置页用来判断要不要显示黄色提示 */
     suspend fun isConfigured(): Boolean = effectiveConfig() != null
 
+    /** 同轮缓存随连接、凭证与模型变化失效；不暴露原配置或密钥。 */
+    suspend fun configurationRevision(): String = MessageDigest.getInstance("SHA-256")
+        .digest(effectiveConfig().toString().toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
     /**
      * 发一次判断请求。questions 至少一条。
      *
@@ -95,6 +100,8 @@ class JevClient(
     suspend fun judge(
         state: JsonElement,
         questions: Map<String, JevQuestion>,
+        requestBudgetMillis: Long = 5000,
+        maxRetries: Int = 1,
     ): Map<String, JevVerdict> {
         val config = effectiveConfig() ?: throw JevUnavailableException(l10n("Jev 未配置", "Jev is not configured"))
         if (questions.isEmpty()) return emptyMap()
@@ -113,36 +120,38 @@ class JevClient(
             .post(body.toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-        val response = withContext(Dispatchers.IO) { executeWithRetry(request) }
-        val responseBody = withContext(Dispatchers.IO) { response.use { it.body?.string().orEmpty() } }
-        if (!response.isSuccessful) {
-            throw JevHttpException(response.code, summarizeError(responseBody))
-        }
-
-        val parsed = try {
-            JevJson.decodeFromString<JevResponse>(responseBody)
-        } catch (e: Exception) {
-            throw JevProtocolException(l10n("响应解析失败: ${e.message}", "Failed to parse response: ${e.message}"), e)
-        }
-
-        val answers = parsed.answers
-        return questions.keys.mapNotNull { id ->
-            answers[id]?.let { answer ->
-                id to JevVerdict(
-                    type = answer.type,
-                    choice = answer.choice,
-                    score = answer.score,
-                    noul = answer.noul,
-                    confidence = answer.confidence,
-                    probabilities = answer.probabilities.orEmpty(),
-                )
+        val response = try {
+            withTimeout(requestBudgetMillis.coerceIn(250, 10000)) {
+                executeWithRetry(request, maxRetries.coerceIn(0, 2))
             }
+        } catch (_: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            throw JevUnavailableException("Jev 请求超时")
+        }
+        if (response.code !in 200..299) {
+            throw JevHttpException(response.code, "Jev 请求失败")
+        }
+
+        val answers = try {
+            val root = JevJson.parseToJsonElement(response.body) as? JsonObject
+                ?: throw JevProtocolException("Jev 响应顶层不是对象")
+            root["answers"] as? JsonObject ?: throw JevProtocolException("Jev 响应缺少 answers 对象")
+        } catch (e: Exception) {
+            throw JevProtocolException(l10n("Jev 响应解析失败", "Failed to parse Jev response"))
+        }
+        if (answers.keys.any { it !in questions }) throw JevProtocolException("Jev 返回了未知问题 ID")
+        return questions.keys.mapNotNull { id ->
+            val answer = answers[id]?.let { raw ->
+                try { JevJson.decodeFromJsonElement(JevAnswer.serializer(), raw) }
+                catch (_: Exception) { null }
+            }
+            answer?.let { JevProtocol.verdict(questions.getValue(id), it)?.let { verdict -> id to verdict } }
         }.toMap()
     }
 
     /**
      * 一次判断 + 阈值判定。低于阈值返回 Uncertain，调用方自行决定是否回退。
-     * noul 类型没有 confidence 字段，用概率本身离 0.5 的距离折算一个等效置信度。
+     * Noul 直接使用肯定/否定概率门槛；Choice 使用所选项概率；Score 使用该类型的分布集中度。
      */
     suspend fun judgeOne(
         state: JsonElement,
@@ -151,6 +160,7 @@ class JevClient(
     ): JevResult<JevVerdict> {
         val config = try {
             effectiveConfig() ?: throw JevUnavailableException(l10n("Jev 未配置", "Jev is not configured"))
+        } catch (e: CancellationException) { throw e
         } catch (e: Exception) {
             Log.d(TAG, "judgeOne 未配置: ${e.message}")
             return JevResult.Failed(l10n("Jev 未配置", "Jev is not configured"))
@@ -158,40 +168,74 @@ class JevClient(
         val verdict = try {
             judge(state, mapOf(id to question))[id]
                 ?: throw JevProtocolException(l10n("响应缺少 question id=$id", "Response is missing question id=$id"))
+        } catch (e: CancellationException) { throw e
         } catch (e: Exception) {
-            Log.d(TAG, "judgeOne 失败: ${e.message}")
-            return JevResult.Failed(e.message ?: l10n("Jev 调用失败", "Jev request failed"))
+            Log.d(TAG, "judgeOne 失败: ${e.javaClass.simpleName}")
+            return JevResult.Failed(l10n("Jev 调用或协议校验失败", "Jev request or protocol validation failed"))
         }
-        val confidence = verdict.confidence ?: equivalentConfidence(verdict)
-        if (confidence != null && confidence < config.threshold) {
-            return JevResult.Uncertain(confidence, config.threshold)
+        if (verdict.type == JevQuestion.TYPE_NOUL) {
+            val yes = config.threshold.coerceIn(0.5, 1.0)
+            if (JevProbability.classify(verdict.noul, yes, 1.0 - yes) == JevDecision.UNCERTAIN) {
+                return JevResult.Uncertain(null, yes)
+            }
+        } else {
+            val certainty = if (verdict.type == JevQuestion.TYPE_CHOICE) verdict.probabilities[verdict.choice]
+                else verdict.confidence
+            if (certainty == null || certainty < config.threshold) return JevResult.Uncertain(certainty, config.threshold)
         }
         return JevResult.Ok(verdict)
     }
 
-    /** noul 没有 confidence：|p - 0.5| * 2 得到 0..1 的等效把握度 */
-    private fun equivalentConfidence(verdict: JevVerdict): Double? {
-        val p = verdict.noul ?: return null
-        return kotlin.math.abs(p - 0.5) * 2
-    }
+    private data class HttpResult(val code: Int, val body: String, val retryAfter: Long?)
 
-    private fun executeWithRetry(request: Request): okhttp3.Response {
+    private suspend fun executeWithRetry(request: Request, maxRetries: Int): HttpResult {
         var attempt = 0
         while (true) {
-            val call = httpClient.newCall(request)
+            currentCoroutineContext().ensureActive()
             try {
-                val response = call.execute()
-                if (!shouldRetry(response.code) || attempt >= JEV_MAX_RETRIES) return response
-                val waitMs = retryAfterMs(response) ?: backoffMs(attempt)
-                response.close()
-                Thread.sleep(waitMs)
+                val response = awaitResponse(request)
+                if (!shouldRetry(response.code) || attempt >= maxRetries) return response
+                delay(response.retryAfter ?: backoffMs(attempt))
                 attempt++
             } catch (e: IOException) {
-                if (attempt >= JEV_MAX_RETRIES) throw e
-                Thread.sleep(backoffMs(attempt))
+                currentCoroutineContext().ensureActive()
+                if (attempt >= maxRetries) throw e
+                delay(backoffMs(attempt))
                 attempt++
             }
         }
+    }
+
+    /** OkHttp 取消绑定协程；响应体在网络线程读取并关闭，取消不遗留同步 execute。 */
+    private suspend fun awaitResponse(request: Request): HttpResult = suspendCancellableCoroutine { continuation ->
+        val call = httpClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val result = response.use {
+                        val body = if (it.isSuccessful) it.body?.byteStream()?.use { input ->
+                            val output = ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                if (output.size() + count > 1_048_576) throw JevProtocolException("Jev 响应超出大小预算")
+                                output.write(buffer, 0, count)
+                            }
+                            output.toString(Charsets.UTF_8.name())
+                        }.orEmpty() else ""
+                        HttpResult(it.code, body, retryAfterMs(it))
+                    }
+                    if (continuation.isActive) continuation.resume(result)
+                } catch (error: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+            }
+        })
     }
 
     private fun shouldRetry(code: Int): Boolean =
@@ -213,19 +257,12 @@ class JevClient(
         return base + jitter
     }
 
-    /**
-     * 错误响应不携带任何部分结果，整个请求失败。这里只给日志留一条可读信息，
-     * 422 的 detail 是 FastAPI 风格的数组，能看到具体是哪个字段不合法。
-     */
-    private fun summarizeError(body: String): String = body.take(500)
-
     companion object {
         /**
          * 官方没有"问题数量"上限，真正的约束是 64k token/请求。
          * 这里设一个保守上限防止一次请求铺得太开，超了要分批。
          */
         const val JEV_MAX_QUESTIONS = 32
-        private const val JEV_MAX_RETRIES = 2
         private const val JEV_BACKOFF_CAP_MS = 5_000L
     }
 }

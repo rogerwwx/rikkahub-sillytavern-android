@@ -156,6 +156,8 @@
   <string name="assistant_page_select_from_gallery">Select from Gallery</string>
   <string name="assistant_page_stream_output">Stream Output</string>
   <string name="assistant_page_stream_output_desc">Whether to enable streaming output for messages</string>
+  <string name="assistant_page_compression_memory_stream">Compression / Memory Streaming</string>
+  <string name="assistant_page_compression_memory_stream_desc">Use streaming requests for compression, dreaming, and memory consolidation. Turn off to use non-streaming requests. Both modes commit only complete results.</string>
   <string name="assistant_page_strict">Strict</string>
   <string name="assistant_page_system_prompt">System Prompt</string>
   <string name="assistant_page_tab_basic">Basic Settings</string>
@@ -1965,7 +1967,7 @@
   <string name="setting_page_huadeng_title_desc">Connection fixes, empty-response fallback, content pruning, context compression</string>
   <string name="setting_page_jev">Jev Decisions</string>
   <string name="setting_page_jev_about">About</string>
-  <string name="setting_page_jev_active_desc">Enabled takeovers run through Jev. Anything it fails or is unsure about silently falls back to the original logic.</string>
+  <string name="setting_page_jev_active_desc">The enabled judge tool uses Jev. Failures and uncertain answers fall back to the original logic.</string>
   <string name="setting_page_jev_active_title">Jev is on duty</string>
   <string name="setting_page_jev_api_key">API key</string>
   <string name="setting_page_jev_base_url">Service URL</string>
@@ -1975,14 +1977,14 @@
   <string name="setting_page_jev_endpoint">Endpoint (what the app actually calls): %1$s</string>
   <string name="setting_page_jev_endpoint_copy">Copy endpoint</string>
   <string name="setting_page_jev_fallback">Fallback behaviour</string>
-  <string name="setting_page_jev_fallback_desc">Any failure — network error, invalid key, unparsable response, or confidence below the threshold — silently falls back to the original logic. No error dialogs, no interruption to the conversation.</string>
+  <string name="setting_page_jev_fallback_desc">Network errors, invalid keys, invalid responses and uncertain answers fall back without interrupting chat. Semantic assistance logs retained, excluded, failed and timed decisions in the assistant dreaming settings.</string>
   <string name="setting_page_jev_memory">Automatic memory screening</string>
-  <string name="setting_page_jev_memory_desc">Memory retrieval is judged by Jev instead of embedding similarity. Falls back to the original retrieval when a single judgment is missing.</string>
+  <string name="setting_page_jev_memory_desc">Enable optional candidate screening in Assistant → Semantic memory → Dreaming settings. It follows the base hybrid retrieval and preserves Embedding. This global page only configures the shared connection.</string>
   <string name="setting_page_jev_model">Judgment model</string>
   <string name="setting_page_jev_takeover">Takeover switches</string>
-  <string name="setting_page_jev_threshold">Confidence threshold</string>
-  <string name="setting_page_jev_threshold_desc">Judgments below this confidence are discarded and the original logic takes over. Applying judgment below the threshold is what causes wrong decisions.</string>
-  <string name="setting_page_jev_threshold_title">Minimum confidence</string>
+  <string name="setting_page_jev_threshold">Generic judge threshold</string>
+  <string name="setting_page_jev_threshold_desc">For the generic judge tool only: Noul uses yes probability and its complementary no threshold, Choice uses selected-option probability, and Score uses distribution concentration. Semantic recall and draft review have separate assistant-level thresholds. These values are not measured accuracy.</string>
+  <string name="setting_page_jev_threshold_title">Generic judgment threshold</string>
   <string name="setting_page_jev_tool">Main model tool call</string>
   <string name="setting_page_jev_tool_desc">Registers Jev as a judge tool on the main model, so it can make extra judgments mid-generation.</string>
   <string name="setting_page_jev_warning_desc">API key is empty or the address is invalid. The switches below can be turned on but nothing will take effect; generation keeps using the original path.</string>
@@ -2021,7 +2023,7 @@
   <string name="setting_page_extensions_desc">Manage plugins, skills, MCP</string>
   <string name="setting_page_general_settings">General Settings</string>
   <string name="setting_page_interaction_notification_settings">Interaction &amp; Notifications</string>
-  <string name="setting_page_jev_what_desc">A judgment-only model: it never writes text, it only picks and scores. Answering takes 70–500 ms and output tokens are free. It is a hidden layer inside the app and never shows up in the model list.</string>
+  <string name="setting_page_jev_what_desc">A TypeSafe System One judgment model called through /v1/systemone, rather than an ordinary OpenAI chat endpoint. Actual latency depends on network and service queues.</string>
   <string name="setting_page_mcp">MCP</string>
   <string name="setting_page_mcp_desc">Configure MCP Servers</string>
   <string name="setting_page_message_display_settings">Message Display</string>

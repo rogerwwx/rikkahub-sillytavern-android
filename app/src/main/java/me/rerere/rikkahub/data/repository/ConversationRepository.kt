@@ -8,6 +8,10 @@ import androidx.paging.PagingSource
 import androidx.paging.map
 import androidx.room.withTransaction
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -27,6 +31,8 @@ import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.utils.JsonInstant
 import java.time.Instant
 import kotlin.uuid.Uuid
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 
 class ConversationRepository(
     private val conversationDAO: ConversationDAO,
@@ -36,6 +42,25 @@ class ConversationRepository(
     private val filesManager: FilesManager,
     private val messageFtsManager: MessageFtsManager,
 ) {
+    private val sourceLock = Mutex()
+    private val sourceRevisionCounter = java.util.concurrent.atomic.AtomicLong()
+    fun sourceRevision(): Long = sourceRevisionCounter.get()
+    private suspend fun <T> withSourceMutation(block: suspend () -> T): T = withSourceLock {
+        try { block() } finally { sourceRevisionCounter.incrementAndGet() }
+    }
+    private class SourceLockContext(val repository: ConversationRepository, var owner: kotlinx.coroutines.Job? = null) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<SourceLockContext>
+    }
+
+    /** 串行化本进程来源保存与后台提交；两个 Room 库仍是各自独立事务。 */
+    suspend fun <T> withSourceLock(block: suspend () -> T): T {
+        val inherited = currentCoroutineContext()[SourceLockContext]
+        if (inherited?.repository === this && inherited.owner === currentCoroutineContext()[kotlinx.coroutines.Job]) return block()
+        return sourceLock.withLock {
+            val marker = SourceLockContext(this)
+            withContext(marker) { marker.owner = currentCoroutineContext()[kotlinx.coroutines.Job]; block() }
+        }
+    }
     companion object {
         private const val PAGE_SIZE = 20
         private const val INITIAL_LOAD_SIZE = 40
@@ -306,7 +331,7 @@ class ConversationRepository(
         }.toMap()
     }
 
-    suspend fun insertConversation(conversation: Conversation) {
+    suspend fun insertConversation(conversation: Conversation) = withSourceMutation {
         database.withTransaction {
             conversationDAO.insert(
                 conversationToConversationEntity(conversation)
@@ -316,7 +341,7 @@ class ConversationRepository(
         messageFtsManager.indexConversation(conversation)
     }
 
-    suspend fun updateConversation(conversation: Conversation) {
+    suspend fun updateConversation(conversation: Conversation) = withSourceMutation {
         database.withTransaction {
             conversationDAO.update(
                 conversationToConversationEntity(conversation)
@@ -328,7 +353,7 @@ class ConversationRepository(
         messageFtsManager.indexConversation(conversation)
     }
 
-    suspend fun deleteConversation(conversation: Conversation) {
+    suspend fun deleteConversation(conversation: Conversation) = withSourceMutation {
         // 获取完整的 Conversation（包含 messageNodes）以正确清理文件
         val fullConversation = if (conversation.messageNodes.isEmpty()) {
             getConversationById(conversation.id) ?: conversation
@@ -368,7 +393,7 @@ class ConversationRepository(
         }
     }
 
-    suspend fun deleteConversationOfAssistant(assistantId: Uuid) {
+    suspend fun deleteConversationOfAssistant(assistantId: Uuid) = withSourceMutation {
         getConversationsOfAssistant(assistantId).first().forEach { conversation ->
             deleteConversation(conversation)
         }
@@ -445,7 +470,7 @@ class ConversationRepository(
         )
     }
 
-    suspend fun updateConversationAssistant(conversationId: Uuid, assistantId: Uuid) {
+    suspend fun updateConversationAssistant(conversationId: Uuid, assistantId: Uuid) = withSourceMutation {
         conversationDAO.updateAssistantId(conversationId.toString(), assistantId.toString())
     }
 

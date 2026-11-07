@@ -16,18 +16,19 @@ object SimpleDictManager {
      * 已是最新版本时直接返回，无需重复拷贝。
      * 可在任意线程调用。
      */
+    @Synchronized
     fun extractDict(context: Context): File {
         val destDir = File(context.filesDir, DICT_ASSET_DIR)
         val versionFile = File(destDir, VERSION_FILE)
 
-        if (versionFile.exists() && versionFile.readText().trim().toIntOrNull() == CURRENT_VERSION) {
+        if (versionFile.exists() && versionFile.readText(Charsets.UTF_8).trim().toIntOrNull() == CURRENT_VERSION) {
             return destDir
         }
 
         destDir.deleteRecursively()
         destDir.mkdirs()
         copyAssetDir(context, DICT_ASSET_DIR, destDir)
-        versionFile.writeText(CURRENT_VERSION.toString())
+        versionFile.writeText(CURRENT_VERSION.toString(), Charsets.UTF_8)
         return destDir
     }
 

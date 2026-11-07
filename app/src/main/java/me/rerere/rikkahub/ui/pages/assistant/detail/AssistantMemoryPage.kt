@@ -109,6 +109,9 @@ fun AssistantMemoryPage(id: String) {
                     BackButton()
                 },
                 actions = {
+                    TextButton(onClick = { navController.navigate(Screen.SemanticMemory(id)) }) {
+                        Text("语义记忆")
+                    }
                     if (MemoryTab.entries[pagerState.currentPage] == MemoryTab.FILES) {
                         IconButton(onClick = { navController.navigate(Screen.MemoryFile(vm.memoryId, null)) }) {
                             Icon(HugeIcons.Add01, contentDescription = stringResource(R.string.add))

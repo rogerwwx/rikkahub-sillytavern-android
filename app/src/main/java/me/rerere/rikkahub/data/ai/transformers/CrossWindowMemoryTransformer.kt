@@ -24,7 +24,10 @@ class CrossWindowMemoryTransformer(
         ctx: TransformerContext,
         messages: List<UIMessage>,
     ): List<UIMessage> {
-        if (!ctx.assistant.enableCrossWindowMemory) return messages
+        if (!ctx.assistant.enableCrossWindowMemory || ctx.assistant.semanticMemory.enabled) {
+            frozenDelta.keys.removeAll { it.startsWith("${ctx.assistant.id}:") }
+            return messages
+        }
         val conversationId = ctx.conversationId?.toString() ?: return messages
 
         val turnKey = "${ctx.assistant.id}:$conversationId"

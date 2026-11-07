@@ -175,4 +175,27 @@ class StreamChunkHandlerTest {
         assertEquals("raw", tool.metadata?.get("call")?.jsonPrimitive?.content)
         assertEquals("raw", tool.metadata?.get("result")?.jsonPrimitive?.content)
     }
+
+    @Test
+    fun `requires action without a new tool never inherits historical tool completion`() {
+        val handler = StreamChunkHandler(model)
+        var messages = listOf(UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(UIMessagePart.Tool("old", "read", "{}", output = listOf(UIMessagePart.Text("done")))),
+            generationCompletion = StreamCompletion.NORMAL,
+        ))
+        messages = handler.handle(messages, StreamChunk.TextDelta("text", "waiting"))
+        messages = handler.handle(messages, StreamChunk.Finish("requires_action", completion = StreamCompletion.NORMAL))
+        assertEquals(StreamCompletion.UNKNOWN, messages.single().generationCompletion)
+
+        messages = handler.handle(messages, StreamChunk.ToolCallStart("new", "read"))
+        messages = handler.handle(messages, StreamChunk.ToolCallDelta("new", inputDelta = "{}"))
+        messages = handler.handle(messages, StreamChunk.ToolCallEnd("new"))
+        messages = handler.handle(messages, StreamChunk.Finish("requires_action", completion = StreamCompletion.NORMAL))
+        assertEquals(StreamCompletion.NORMAL, messages.single().generationCompletion)
+
+        messages = handler.handle(messages, StreamChunk.TextDelta("next", "waiting again"))
+        messages = handler.handle(messages, StreamChunk.Finish("requires_action", completion = StreamCompletion.NORMAL))
+        assertEquals(StreamCompletion.UNKNOWN, messages.single().generationCompletion)
+    }
 }

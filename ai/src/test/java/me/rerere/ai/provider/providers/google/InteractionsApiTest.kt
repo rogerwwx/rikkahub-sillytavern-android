@@ -17,6 +17,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.stream.SseEvent
+import me.rerere.ai.ui.CompleteStreamGuard
 import me.rerere.ai.ui.GoogleInteractionsMetadata
 import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.ServerToolMetadata
@@ -24,6 +25,7 @@ import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.StreamChunkHandler
+import me.rerere.ai.ui.StreamCompletion
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -284,7 +286,10 @@ class InteractionsApiTest {
         assertEquals(2, message.parts.size)
         assertEquals(listOf(UIMessageAnnotation.UrlCitation("Example", "https://example.com")), message.annotations)
         assertEquals(TokenUsage(promptTokens = 11, completionTokens = 335, totalTokens = 346, cachedTokens = 2), message.usage)
-        assertEquals(StreamChunk.Finish("completed", "v1_abc", "gemini-3.8-flash"), chunks.last())
+        assertEquals(
+            StreamChunk.Finish("completed", "v1_abc", "gemini-3.8-flash", StreamCompletion.NORMAL),
+            chunks.last(),
+        )
     }
 
     @Test
@@ -307,7 +312,13 @@ class InteractionsApiTest {
             """{"interaction":{"id":"v1_tools","status":"requires_action","usage":{"total_tokens":299,"total_input_tokens":138,"total_output_tokens":20,"total_thought_tokens":141}},"event_type":"interaction.completed"}""",
         )
 
-        assertEquals(StreamChunk.Finish("requires_action", "v1_tools", "gemini-3.8-flash"), chunks.last())
+        assertEquals(
+            StreamChunk.Finish("requires_action", "v1_tools", "gemini-3.8-flash", StreamCompletion.NORMAL),
+            chunks.last(),
+        )
+        val guard = CompleteStreamGuard()
+        chunks.forEach(guard::accept)
+        guard.requireComplete()
 
         val serverTool = message.parts[0] as UIMessagePart.ServerTool
         assertEquals("mkutnkgn", serverTool.toolCallId)

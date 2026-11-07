@@ -29,8 +29,8 @@ fun createJudgeTool(jevClient: JevClient): Tool = Tool(
     name = "judge",
     description = "" +
         "Jev: ask a dedicated fast judgment model (TypeSafe System One) a yes/no, multiple-choice, or rating " +
-        "question about a piece of text. It only judges — it never writes content. Returns the answer with a " +
-        "calibrated confidence score, end-to-end in ~100ms and free.\n" +
+        "question about a piece of text. It returns typed probabilities: Noul is yes probability; " +
+        "Choice and Score include their option or level distributions. It never writes content.\n" +
         "PREFER calling judge over reasoning out the answer yourself when the question is binary, a choice, or a rating — " +
         "especially when you feel uncertain. Use it for quick checks mid-generation (off-topic? which option fits? " +
         "rate the current mood). Do not use it to summarize or generate text.",
@@ -39,7 +39,7 @@ fun createJudgeTool(jevClient: JevClient): Tool = Tool(
     systemPrompt = { _, _ ->
         "Quick checks → judge (the Jev judgment model: yes/no, pick an option, or rate against levels). " +
             "When you are unsure about a yes/no, choice, or rating question, call judge instead of guessing — " +
-            "it is fast, free, and calibrated. It answers questions; it never writes content."
+            "Inspect its typed probabilities and fall back when uncertain. It answers questions; it never writes content."
     },
     parameters = {
         InputSchema.Obj(
@@ -109,9 +109,10 @@ fun createJudgeTool(jevClient: JevClient): Tool = Tool(
             }
             is JevResult.Uncertain -> buildJsonObject {
                 put("ok", JsonPrimitive(false))
-                put("reason", JsonPrimitive("confidence below threshold"))
-                result.confidence?.let { put("confidence", JsonPrimitive(it)) }
+                put("reason", JsonPrimitive("typed judgment is uncertain"))
+                result.certainty?.let { put(if (type == JevQuestion.TYPE_CHOICE) "selected_option_probability" else "confidence", JsonPrimitive(it)) }
                 put("threshold", JsonPrimitive(result.fallback))
+                if (type == JevQuestion.TYPE_NOUL) put("no_threshold", JsonPrimitive(1.0 - result.fallback))
                 put("note", JsonPrimitive("判断不可靠，请自行判断，不要把这个结果当结论"))
             }
             is JevResult.Failed -> buildJsonObject {
@@ -125,8 +126,8 @@ fun createJudgeTool(jevClient: JevClient): Tool = Tool(
 )
 
 /** 按 type 把 options / levels 转成 Jev 的 criteria 结构 */
-private fun buildCriteria(obj: kotlinx.serialization.json.JsonObject, type: String): JsonElement? =
-    when (type) {
+private fun buildCriteria(obj: kotlinx.serialization.json.JsonObject, type: String): JsonElement? {
+    return when (type) {
         JevQuestion.TYPE_CHOICE -> {
             val options = obj["options"]?.jsonArrayOrNull() ?: return null
             if (options.isEmpty()) return null
@@ -144,6 +145,7 @@ private fun buildCriteria(obj: kotlinx.serialization.json.JsonObject, type: Stri
             put("false", JsonPrimitive("不成立"))
         }
     }
+}
 
 private fun JsonElement.jsonArrayOrNull(): List<String>? =
     (this as? kotlinx.serialization.json.JsonArray)

@@ -92,6 +92,8 @@ import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantExtensionsPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantLocalToolPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantMcpPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantMemoryPage
+import me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryPage
+import me.rerere.rikkahub.ui.pages.assistant.detail.SemanticDreamSettingsPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantPromptPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantRequestPage
 import me.rerere.rikkahub.ui.pages.backup.BackupPage
@@ -520,6 +522,13 @@ class RouteActivity : ComponentActivity() {
 
                             entry<Screen.AssistantMemory> { key ->
                                 AssistantMemoryPage(key.id)
+                            }
+
+                            entry<Screen.SemanticMemory> { key ->
+                                SemanticMemoryPage(key.id)
+                            }
+                            entry<Screen.SemanticDreamSettings> { key ->
+                                SemanticDreamSettingsPage(key.id)
                             }
 
                             entry<Screen.MemoryFile> { key ->
@@ -1002,6 +1011,12 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data class AssistantMemory(val id: String) : Screen
+
+    @Serializable
+    data class SemanticMemory(val id: String) : Screen
+
+    @Serializable
+    data class SemanticDreamSettings(val id: String) : Screen
 
     /** 记忆库 [memoryId] 里的一个文件，[path] 为 null 时新建 */
     @Serializable

@@ -24,6 +24,8 @@ import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.SQLiteConfiguration
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.MediaCreationFiles
+import me.rerere.rikkahub.data.memory.semantic.SemanticMemoryDatabase
+import me.rerere.rikkahub.data.repository.ConversationRepository
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
@@ -39,6 +41,8 @@ class BackupManager(
     private val database: AppDatabase,
     private val settingsStore: SettingsStore,
     private val json: Json,
+    private val semanticDatabase: SemanticMemoryDatabase,
+    private val conversationRepository: ConversationRepository,
 ) {
     private val restoreMutex = Mutex()
 
@@ -53,6 +57,24 @@ class BackupManager(
         val staging = Files.createTempDirectory(context.cacheDir.toPath(), "backup-").toFile()
         try {
             val settings = settingsStore.awaitLoaded()
+            val snapshots = if (includeDatabase) conversationRepository.withSourceLock {
+                checkSettingsUnchanged(settings)
+                // 同一来源锁覆盖两次快照；VACUUM不放进Room事务，压缩与附件在锁外。
+                val main = File(staging, SQLiteConfiguration.DATABASE_NAME)
+                DatabaseBackup.createSnapshot(database.openHelper.writableDatabase, main)
+                val files = mutableListOf(main to DatabaseBackup.ARCHIVE_DATABASE)
+                if (!upstreamCompatible) {
+                    val semantic = File(staging, SemanticMemoryDatabase.NAME)
+                    DatabaseBackup.createSnapshot(semanticDatabase.openHelper.writableDatabase, semantic)
+                    files += semantic to SemanticDatabaseBackup.ARCHIVE_DATABASE
+                }
+                checkSettingsUnchanged(settings)
+                files
+            } else emptyList()
+            if (upstreamCompatible && snapshots.isNotEmpty()) {
+                UpstreamCompat.downgradeDatabase(context, snapshots.first().first, json)
+            }
+            checkSettingsUnchanged(settings)
             ZipOutputStream(FileOutputStream(archive)).use { zip ->
                 zip.putNextEntry(ZipEntry("settings.json"))
                 val settingsJson = json.encodeSettings(settings, settingsStore.launchCountFlow.first())
@@ -60,12 +82,7 @@ class BackupManager(
                     if (upstreamCompatible) UpstreamCompat.settingsJson(settingsJson, json) else settingsJson
                 zip.write(payload.toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
-                if (includeDatabase) {
-                    val snapshot = File(staging, SQLiteConfiguration.DATABASE_NAME)
-                    DatabaseBackup.createSnapshot(database.openHelper.writableDatabase, snapshot)
-                    if (upstreamCompatible) UpstreamCompat.downgradeDatabase(context, snapshot, json)
-                    addFile(zip, snapshot, DatabaseBackup.ARCHIVE_DATABASE)
-                }
+                for ((snapshot, name) in snapshots) addFile(zip, snapshot, name)
                 if (includeFiles) {
                     for (folder in ATTACHMENT_FOLDERS) {
                         val directory = File(context.filesDir, folder)
@@ -84,6 +101,7 @@ class BackupManager(
                     }
                 }
             }
+            checkSettingsUnchanged(settings)
             archive
         } catch (e: Throwable) {
             archive.delete()
@@ -102,6 +120,8 @@ class BackupManager(
                     val payload = File(staging, "payload")
                     val stagedDatabase = File(payload, "database/${SQLiteConfiguration.DATABASE_NAME}")
                     val stagedWal = File(stagedDatabase.path + "-wal")
+                    val stagedSemantic = File(payload, "database/${SemanticMemoryDatabase.NAME}")
+                    val stagedSemanticWal = File(stagedSemantic.path + "-wal")
                     val seen = mutableSetOf<String>()
                     var restoredEntries = 0
                     ZipFile(archive).use { zip ->
@@ -115,7 +135,9 @@ class BackupManager(
                                 "settings.json" -> File(staging, "settings.json")
                                 DatabaseBackup.ARCHIVE_DATABASE -> if (includeDatabase) stagedDatabase else null
                                 DatabaseBackup.WAL -> if (includeDatabase) stagedWal else null
-                                DatabaseBackup.SHM -> null // Rebuilt by SQLite; never restore shared-memory state.
+                                DatabaseBackup.SHM, SemanticDatabaseBackup.SHM -> null // SQLite rebuilds SHM.
+                                SemanticDatabaseBackup.ARCHIVE_DATABASE -> if (includeDatabase) stagedSemantic else null
+                                SemanticDatabaseBackup.WAL -> if (includeDatabase) stagedSemanticWal else null
                                 else -> if (includeFiles && isAttachment(entry.name)) {
                                     PendingRestore.resolveInside(File(payload, "files"), entry.name)
                                 } else null
@@ -135,6 +157,8 @@ class BackupManager(
                     }
                     require(restoredEntries > 0) { "No selected data found in the backup" }
                     require(!stagedWal.exists() || stagedDatabase.exists()) { "Backup WAL has no matching database" }
+                    require(!stagedSemanticWal.exists() || stagedSemantic.exists()) { "Semantic backup WAL has no matching database" }
+                    require(!stagedSemantic.exists() || stagedDatabase.exists()) { "Semantic backup has no matching main database" }
                     if (stagedDatabase.exists()) {
                         DatabaseBackup.normalize(context, stagedDatabase)
                         // 显式升级 + 结构对齐：恢复不再依赖 Room 的迁移容器，
@@ -149,9 +173,11 @@ class BackupManager(
                         DatabaseBackup.removeSidecars(stagedDatabase)
                     }
 
+                    if (stagedSemantic.exists()) SemanticDatabaseBackup.validate(context, stagedSemantic)
+
                     val settingsFile = File(staging, "settings.json")
                     if (settingsFile.exists()) {
-                        val migrated = SettingsJsonMigrator.migrate(settingsFile.readText())
+                        val migrated = SettingsJsonMigrator.migrate(settingsFile.readText(Charsets.UTF_8))
                         val settings = json.decodeFromString<Settings>(migrated)
                         require(!settings.init) { "Backup contains uninitialized settings" }
                         // Persist the migrated value once, including generated IDs, for restart/retry consistency.
@@ -192,6 +218,10 @@ class BackupManager(
             throw e
         }
         return room
+    }
+
+    private suspend fun checkSettingsUnchanged(expected: Settings) {
+        check(settingsStore.awaitLoaded() == expected) { "Backup settings changed; retry the backup" }
     }
 
     private fun isAttachment(name: String): Boolean {
@@ -258,6 +288,7 @@ class BackupManager(
             root = File(context.noBackupFilesDir, "backup-restore"),
             databaseFile = context.getDatabasePath(SQLiteConfiguration.DATABASE_NAME),
             filesDir = context.filesDir,
+            semanticDatabaseFile = context.getDatabasePath(SemanticMemoryDatabase.NAME),
         )
 
         /** Must finish before Koin, Room, SettingsStore or any background consumers are initialized. */

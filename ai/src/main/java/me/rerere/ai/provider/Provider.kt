@@ -15,6 +15,8 @@ import kotlin.uuid.Uuid
 // 提供商实现
 // 采用无状态设计，使用时除了需要传入需要的参数外，还需要传入provider setting作为参数
 interface Provider<T : ProviderSetting> {
+    val supportsEmbedding: Boolean get() = false
+
     suspend fun listModels(providerSetting: T): List<Model>
 
     /** 查询额度，见 [ProviderQuota]。不支持或没有开启时返回 null */

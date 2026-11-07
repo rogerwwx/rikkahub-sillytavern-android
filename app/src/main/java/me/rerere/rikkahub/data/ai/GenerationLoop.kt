@@ -46,7 +46,13 @@ import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.PromptDebugCache
-import me.rerere.rikkahub.data.ai.tools.buildMemoryTools
+import me.rerere.rikkahub.data.ai.tools.buildAssistantMemoryTools
+import me.rerere.rikkahub.data.memory.semantic.SemanticMemoryRepository
+import me.rerere.rikkahub.data.memory.semantic.SemanticRecallResult
+import me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist
+import me.rerere.rikkahub.data.memory.semantic.budgetSemanticRecall
+import me.rerere.rikkahub.data.memory.semantic.semanticRecallPrompt
+import me.rerere.rikkahub.data.memory.semantic.injectSemanticPrompt
 import me.rerere.rikkahub.data.ai.tools.truncateForToolResult
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.data.datastore.Settings
@@ -113,6 +119,8 @@ class GenerationLoop(
     private val providerManager: ProviderManager,
     private val json: Json,
     private val memoryRepo: MemoryRepository,
+    private val semanticMemoryRepo: SemanticMemoryRepository,
+    private val semanticJevAssist: SemanticJevAssist,
     private val conversationRepo: ConversationRepository,
     private val pluginToolProvider: me.rerere.rikkahub.plugin.provider.PluginToolProvider,
 ) {
@@ -234,7 +242,8 @@ class GenerationLoop(
             if (hasPython) add("Python → execute_python (data processing, API)")
             if (hasCalculator) add("Math → calculator${if (hasPython) " (NOT execute_python)" else ""}")
             if (hasTool("web_search", "search_", "scrape_")) add("Web → web_search / web_fetch")
-            if (hasTool("memory_tool", "memory_")) add("Memory → memory_tool")
+            if (hasTool("memory_semantic_")) add("Memory → memory_semantic_search/save/delete")
+            else if (hasTool("memory_tool", "memory_")) add("Memory → memory_tool")
         }
         val ethicLines = buildList {
             add("❌ Do NOT describe what you will do — just do it")
@@ -288,12 +297,19 @@ class GenerationLoop(
     }
 
     // ── 预构建：tools + systemPrompt（循环不变，移到外面）──
-    val toolsInternal = buildList {
+    var toolsInternal = buildList {
         Log.i(TAG, "generateInternal: build tools($assistant)")
         // 酒馆模式：本层是全部生成路径的公共叠加点，必须兜底裁剪。
         // 不保留工具时整组清空；保留时只留酒馆基础工具面（插件 + 文件/搜索/抓取/计算器 + 记忆），
         // 技能、MCP、工作空间等 App 工作流工具不进请求。
         addAll(tools)
+        // 防止辅助调用路径将旧工具传入语义模式，或将语义工具带回旧模式。
+        removeAll { tool ->
+            if (assistant.semanticMemory.enabled) tool.name in me.rerere.rikkahub.data.ai.tools.MemoryToolNames.run {
+                setOf(READ, WRITE, STR_REPLACE, APPEND, DELETE, LIST)
+            } || tool.name == "memory_tool"
+            else tool.name.startsWith("memory_semantic_")
+        }
         if (settings.huadengSettings.enableTavernMode) {
             if (settings.huadengSettings.tavernModeKeepTools) {
                 retainAll { it.name.isTavernBaseTool() }
@@ -304,7 +320,7 @@ class GenerationLoop(
         // 本轮最终注册的工具名：排查「记忆工具为何不见了」这类问题时，这一行就是答案
         Log.i(TAG, "tools(${if (settings.huadengSettings.enableTavernMode) "tavern" else "normal"}): ${if (isEmpty()) "(none)" else joinToString(", ") { it.name }}")
     }
-    val statusTrackedTools = toolsInternal.map { tool ->
+    fun trackToolStatus(tools: List<Tool>) = tools.map { tool ->
         if (tool.name == "ask_user") tool else tool.copy(
             execute = { args ->
                 processingStatus.value = describeTool(tool.name)
@@ -319,8 +335,12 @@ class GenerationLoop(
             }
         )
     }
+    var statusTrackedTools = trackToolStatus(toolsInternal)
+    val memoryToolsAllowed = tools.any { it.name.startsWith("memory_") || it.name == "memory_tool" } &&
+        (!settings.huadengSettings.enableTavernMode || settings.huadengSettings.tavernModeKeepTools)
     // ── 预构建：system 消息列表（循环不变，移到外面）──
-    val prebuiltSystemMessages = buildCachedSystemPrompt(assistant, settings, messages, memories ?: emptyList(), conversationSystemPrompt, tools, model, context, conversationRepo)
+    var prebuiltSystemMessages = emptyList<UIMessage>()
+    var systemMemoryMode: Boolean? = null
 
     // Recent Chats 每轮只构建一次（agentic 循环每步复用）：底层查询会反序列化 10 个会话的
     // 全部消息节点，每步重查是纯浪费；内容精度只到日期，单轮内复用完全安全
@@ -331,8 +351,23 @@ class GenerationLoop(
     // 流式期间正则改由 applyStreamingRegexTail 只跑正在生成的最后一条，避免整段历史逐 chunk 重算
     val streamingTransformers = outputTransformers.filterNot { it is RegexOutputTransformer }
 
+    // 缓存只属于本轮生成；注入副本不进入 messages，也不形成做梦来源。
+    var semanticRevision: String? = null
+    var semanticRecall: SemanticRecallResult? = null
+    var injectedSemanticEventId: String? = null
+    val semanticQuery = messages.lastOrNull { it.role == MessageRole.USER }?.toText().orEmpty()
     for (stepIndex in 0 until maxSteps) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
+            val semanticConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: assistant.semanticMemory.normalized()
+            var requestAssistant = assistant.copy(semanticMemory = semanticConfig)
+            toolsInternal = toolsInternal.filterNot { it.name.startsWith("memory_") || it.name == "memory_tool" } +
+                if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant) else emptyList()
+            statusTrackedTools = trackToolStatus(toolsInternal)
+            if (systemMemoryMode != semanticConfig.enabled) {
+                prebuiltSystemMessages = buildCachedSystemPrompt(requestAssistant, settings, messages,
+                    memories ?: emptyList(), conversationSystemPrompt, toolsInternal, model, context, conversationRepo)
+                systemMemoryMode = semanticConfig.enabled
+            }
 
             // Check if we have tool calls ready to continue after user interaction.
             val pendingTools = messages.lastOrNull()?.getTools()?.filter {
@@ -343,8 +378,57 @@ class GenerationLoop(
 
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
+                if (semanticConfig.enabled) {
+                    conversationId?.let { id ->
+                        UserContextAnchorCache.getOrCreate(id).blocks.removeAll { it.tag == ANCHOR_TAG_MEMORY }
+                    }
+                    val revision = semanticMemoryRepo.recallRevision(assistant.id.toString(), semanticConfig) +
+                        if (semanticConfig.dream.jevEnabled && semanticConfig.dream.jevRecall)
+                            semanticJevAssist.configurationRevision() else ""
+                    if (revision != semanticRevision) {
+                        semanticRecall = if (semanticQuery.isBlank()) null else {
+                            val base = budgetSemanticRecall(
+                                semanticMemoryRepo.recall(assistant.id.toString(), semanticQuery, semanticConfig), semanticConfig)
+                            val screened = semanticJevAssist.filterRecall(assistant.id.toString(), semanticQuery,
+                                messages.takeLast(6).joinToString("\n") { "${it.role}: ${it.toText()}" }.take(6000),
+                                semanticConfig, base)
+                            budgetSemanticRecall(screened, semanticConfig)
+                        }
+                        semanticRevision = revision
+                    }
+                } else {
+                    semanticRevision = null
+                    semanticRecall = null
+                }
+                // Embedding 等待期间的模式/配置变化不能把旧召回带入本次请求。
+                val latestConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: semanticConfig
+                if (latestConfig != semanticConfig) {
+                    semanticRevision = null
+                    semanticRecall = null
+                    requestAssistant = assistant.copy(semanticMemory = latestConfig)
+                    toolsInternal = toolsInternal.filterNot { it.name.startsWith("memory_") || it.name == "memory_tool" } +
+                        if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant) else emptyList()
+                    statusTrackedTools = trackToolStatus(toolsInternal)
+                    if (systemMemoryMode != latestConfig.enabled) {
+                        prebuiltSystemMessages = buildCachedSystemPrompt(requestAssistant, settings, messages,
+                            memories ?: emptyList(), conversationSystemPrompt, toolsInternal, model, context, conversationRepo)
+                        systemMemoryMode = latestConfig.enabled
+                    }
+                }
+                if (semanticRecall != null && latestConfig.dream.jevEnabled && latestConfig.dream.jevRecall) {
+                    val currentRevision = semanticMemoryRepo.recallRevision(assistant.id.toString(), latestConfig) +
+                        semanticJevAssist.configurationRevision()
+                    if (currentRevision != semanticRevision) {
+                        semanticRevision = null
+                        semanticRecall = null
+                    }
+                }
+                semanticRecall?.takeIf { it.hits.isNotEmpty() && it.eventId != injectedSemanticEventId }?.let {
+                    semanticMemoryRepo.recordInjection(it)
+                    injectedSemanticEventId = it.eventId
+                }
                 generateInternal(
-                    assistant = assistant,
+                    assistant = requestAssistant,
                     settings = settings,
                     messages = messages,
                     onUpdateMessages = {
@@ -392,6 +476,7 @@ class GenerationLoop(
                     workspaceCwd = workspaceCwd,
                     generationType = generationType,
                     maxTokensOverride = maxTokensOverride,
+                    semanticPrompt = semanticRecall?.let(::semanticRecallPrompt).orEmpty(),
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
@@ -638,6 +723,7 @@ class GenerationLoop(
         generationType: me.rerere.rikkahub.data.model.GenerationType = me.rerere.rikkahub.data.model.GenerationType.NORMAL,
         maxTokensOverride: Int? = null,
         prebuiltRecentChats: String = "",
+        semanticPrompt: String = "",
     ) {
         val limitedChat = messages.limitContext(assistant.contextMessageLimit)
         // 酒馆模式：请求中只保留原版酒馆的上下文构成（角色卡/世界书/示例消息/作者注释）
@@ -728,7 +814,7 @@ class GenerationLoop(
             // 提示词缓存：记忆走冻结锚点（历史中间/尾部），内容被后台整理改写时
             // 旧块原位保留、新块追加尾部，前缀不再每轮分叉；不走前缀区的独立 system 消息。
             // 酒馆模式只在记忆工具真正注册时才注入，否则模型看得到记忆却写不了
-            val memoryToolsRegistered = assistant.enableMemory &&
+            val memoryToolsRegistered = assistant.enableMemory && !assistant.semanticMemory.enabled &&
                 (!tavernMode || settings.huadengSettings.tavernModeKeepTools)
             val memoryPrompt = if (memoryToolsRegistered && !memories.isNullOrEmpty()) {
                 buildMemoryPrompt(memories)
@@ -911,6 +997,8 @@ class GenerationLoop(
             } else {
                 base
             }
+        }.let { request ->
+            injectSemanticPrompt(request, semanticPrompt, assistant.semanticMemory, limitedChat.size)
         }.transforms(
             transformers = transformers,
             context = context,
@@ -985,26 +1073,20 @@ class GenerationLoop(
             disableReasoning = assistant.reasoningLevel == me.rerere.ai.core.ReasoningLevel.OFF,
         )
         try {
+            val responseBaseMessages = messages.beginAssistantResponse(model)
+            messages = responseBaseMessages
+            onUpdateMessages(responseBaseMessages)
             if (stream) {
                 // 每次重试都从本次模型调用开始前的消息快照重新合并，避免将重试响应
                 // 追加到已经展示的半截回复后面。预先创建助手消息可让所有尝试复用同一 ID，
                 // ChatService 因而会覆盖当前分支，而不是创建新的候选消息。
-                val responseBaseMessages =
-                    if (messages.lastOrNull()?.role == MessageRole.ASSISTANT) {
-                        messages
-                    } else {
-                        messages + UIMessage(
-                            role = MessageRole.ASSISTANT,
-                            parts = emptyList(),
-                            modelId = model.id,
-                        )
-                    }
                 var retryCount = 0
                 var emptyRetryCount = 0
 
                 while (true) {
                     val streamChunkHandler = StreamChunkHandler(model)
                     var attemptMessages = responseBaseMessages
+                    onUpdateMessages(attemptMessages)
                     // 防空回复：重试时对请求副本的末条用户消息做微扰（历史消息不动）
                     val requestMessages =
                         if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount)
@@ -1064,7 +1146,7 @@ class GenerationLoop(
             } else {
                 var emptyRetryCount = 0
                 // 每次空回复重试都基于同一快照合并结果，避免把空回复消息残留在历史里
-                val baseMessages = messages
+                val baseMessages = responseBaseMessages
                 while (true) {
                     val requestMessages =
                         if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount)

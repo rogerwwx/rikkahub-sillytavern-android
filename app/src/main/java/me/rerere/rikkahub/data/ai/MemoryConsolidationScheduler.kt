@@ -118,6 +118,7 @@ class MemoryConsolidationScheduler(
     private val isAppVisible: () -> Boolean = { true },
     private val idleDelay: Duration = 2.minutes,
     private val maxPendingTurns: Int = 6,
+    private val semanticScheduler: me.rerere.rikkahub.data.memory.semantic.SemanticDreamScheduler? = null,
 ) {
     private val lock = Any()
 
@@ -136,6 +137,7 @@ class MemoryConsolidationScheduler(
 
     /** 一轮对话结束：空闲一段时间后整理，攒够轮数就不再等 */
     fun onTurnFinished(conversation: Conversation) {
+        semanticScheduler?.onTurnFinished(conversation)
         // 应用不在前台时，聊天生成的前台服务一释放进程就可能被冻结，空闲计时走不完。
         // 所以趁它还在先把保活占住，一直占到这次整理结束
         val hold = if (isAppVisible()) null else keepAlive.acquire()
@@ -164,11 +166,13 @@ class MemoryConsolidationScheduler(
 
     /** 应用被切到后台：之后空闲计时不一定还能走完，有待整理的就现在开始 */
     fun onAppHidden() {
+        semanticScheduler?.onAppHidden()
         synchronized(lock) { pending.filterValues { it.hasAutomatic() }.keys.toList() }.forEach(::launchRun)
     }
 
     /** 用户离开了对话，不会马上再有新消息，不用等到空闲 */
     fun onConversationLeft(conversationId: Uuid) {
+        semanticScheduler?.onConversationLeft(conversationId)
         val memoryId = synchronized(lock) {
             pending.entries.firstOrNull { it.value[conversationId]?.automatic == true }?.key
         } ?: return
@@ -177,6 +181,7 @@ class MemoryConsolidationScheduler(
 
     /** 应用启动时补上进程被杀前没来得及整理的对话 */
     suspend fun resumePending() {
+        semanticScheduler?.resumePending()
         // 每个记忆库各查各的：一起查再截断的话，对话少的记忆库会被对话多的挤掉
         worker.memoryIdsWithUpdates().forEach { memoryId ->
             if (mergePending(memoryId, worker.findPending(memoryId))) restartTimer(memoryId)

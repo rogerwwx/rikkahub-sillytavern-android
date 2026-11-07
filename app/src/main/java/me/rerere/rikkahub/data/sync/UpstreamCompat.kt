@@ -170,6 +170,7 @@ internal object UpstreamCompat {
         if (type != null && type !in UPSTREAM_SERIAL_NAMES) return null
         return buildJsonObject {
             for ((key, value) in source) {
+                if (parentKey == "assistants" && key == "semanticMemory") continue
                 if (key in RAW_JSON_KEYS) {
                     put(key, value)
                     continue

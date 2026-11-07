@@ -17,6 +17,7 @@ internal class PendingRestore(
     private val root: File,
     private val databaseFile: File,
     private val filesDir: File,
+    private val semanticDatabaseFile: File,
 ) {
     private val pending get() = File(root, "pending")
 
@@ -41,7 +42,12 @@ internal class PendingRestore(
         val journal = File(pending, "journal.json")
         val entries = if (journal.exists()) {
             // An existing journal may describe an interrupted installation; keep it if reading fails.
-            Json.decodeFromString<List<RestoreEntry>>(journal.readText())
+            val existing = Json.decodeFromString<List<RestoreEntry>>(journal.readText(Charsets.UTF_8))
+            existing.forEach { targetFile(it.path) }
+            completeLegacyJournal(existing).also {
+                // 主库可能已经安装；补齐失败时保留旧journal与originals，先停止启动再重试。
+                if (it != existing) writeDurably(journal, Json.encodeToString(it))
+            }
         } else {
             try {
                 buildEntries().also { writeDurably(journal, Json.encodeToString(it)) }
@@ -65,7 +71,7 @@ internal class PendingRestore(
                 }
             }
             val settings = File(pending, "settings.json")
-            if (settings.isFile) restoreSettings(settings.readText())
+            if (settings.isFile) restoreSettings(settings.readText(Charsets.UTF_8))
         } catch (e: Exception) {
             try {
                 rollback(entries)
@@ -86,6 +92,20 @@ internal class PendingRestore(
         return true
     }
 
+    private fun completeLegacyJournal(entries: List<RestoreEntry>): List<RestoreEntry> {
+        val mainPath = "database/${databaseFile.name}"
+        val semanticPath = "database/${semanticDatabaseFile.name}"
+        if (entries.none { it.path == mainPath && it.install } || entries.any { it.path == semanticPath }) {
+            return entries
+        }
+        // 旧journal恢复主库的证据仍在，不能依赖已被移走的payload来决定语义清理。
+        val paths = entries.mapTo(HashSet()) { it.path }
+        val missing = listOf("", "-wal", "-shm", "-journal").map { "$semanticPath$it" }
+            .filter { it !in paths }
+            .map { RestoreEntry(it, install = false, hadOriginal = targetFile(it).exists()) }
+        return missing + entries
+    }
+
     private fun buildEntries(): List<RestoreEntry> {
         val payload = File(pending, "payload")
         val paths = payload.walkTopDown().filter { it.isFile }.map {
@@ -94,10 +114,18 @@ internal class PendingRestore(
         val entries = paths.map { path ->
             RestoreEntry(path, install = true, hadOriginal = targetFile(path).exists())
         }.toMutableList()
-        if (paths.contains("database/${databaseFile.name}")) {
-            // The new database is standalone. Keep the old DB's sidecars with the old DB only.
+        val restoresMain = "database/${databaseFile.name}" in paths
+        for (file in listOf(databaseFile, semanticDatabaseFile)) {
+            val databasePath = "database/${file.name}"
+            val replacesDatabase = databasePath in paths
+            val clearsLegacySemantic = file == semanticDatabaseFile && restoresMain && !replacesDatabase
+            if (!replacesDatabase && !clearsLegacySemantic) continue
+            // 旧整库备份缺语义库时，同journal移走全部旧状态；失败仍可恢复原文件。
+            if (clearsLegacySemantic) {
+                entries.add(0, RestoreEntry(databasePath, install = false, hadOriginal = file.exists()))
+            }
             for (suffix in listOf("-wal", "-shm", "-journal")) {
-                val path = "database/${databaseFile.name}$suffix"
+                val path = "$databasePath$suffix"
                 entries.add(0, RestoreEntry(path, install = false, hadOriginal = targetFile(path).exists()))
             }
         }
@@ -118,13 +146,10 @@ internal class PendingRestore(
         return when {
             path.startsWith("database/") -> {
                 val name = path.removePrefix("database/")
-                require(name in listOf(
-                    databaseFile.name, databaseFile.name + "-wal",
-                    databaseFile.name + "-shm", databaseFile.name + "-journal"
-                )) {
-                    "Invalid restore database path"
-                }
-                File(databaseFile.parentFile, name)
+                val database = listOf(databaseFile, semanticDatabaseFile).firstOrNull { file ->
+                    name in listOf(file.name, file.name + "-wal", file.name + "-shm", file.name + "-journal")
+                } ?: error("Invalid restore database path")
+                File(database.parentFile, name)
             }
             path.startsWith("files/") -> resolveInside(filesDir, path.removePrefix("files/"))
             else -> error("Invalid restore path: $path")

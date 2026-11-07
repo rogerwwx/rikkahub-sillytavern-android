@@ -83,12 +83,12 @@ class CrossWindowMemoryCoreTest {
     @Test
     fun `claimCompression keeps tail and previous summary untouched`() {
         val c = core()
-        repeat(10) { i -> c.append("a1", "conv1", "m$i", "user", "内容".repeat(100) + i) }
+        repeat(10) { i -> c.append("a1", "conv1", "m$i", if (i % 2 == 0) "user" else "assistant", "内容".repeat(100) + i) }
         val work = c.claimCompression(assistantId = "a1", thresholdChars = 100, tailEntries = 3)
         assertNotNull(work)
-        assertEquals(7, work!!.entries.size)
-        // 前缀最后一条 = 总条数 - 尾部保留条数
-        assertEquals(10 - 3, work.throughEntryId)
+        assertEquals(6, work!!.entries.size)
+        // 至少保留3条，切点向完整轮次边界退回，因此实际保留4条。
+        assertEquals(6L, work.throughEntryId)
 
         // 租约期内不可重复认领
         now += 60_000
@@ -105,7 +105,7 @@ class CrossWindowMemoryCoreTest {
     @Test
     fun `completeCompression replaces prefix with summary`() {
         val c = core()
-        repeat(6) { i -> c.append("a1", "conv1", "m$i", "user", "内容".repeat(50) + i) }
+        repeat(6) { i -> c.append("a1", "conv1", "m$i", if (i % 2 == 0) "user" else "assistant", "内容".repeat(50) + i) }
         val work = c.claimCompression(assistantId = "a1", thresholdChars = 100, tailEntries = 2)
         assertNotNull(work)
         val throughId = work!!.throughEntryId
@@ -123,7 +123,7 @@ class CrossWindowMemoryCoreTest {
     @Test
     fun `failCompression releases the lease`() {
         val c = core()
-        repeat(6) { i -> c.append("a1", "conv1", "m$i", "user", "内容".repeat(50) + i) }
+        repeat(6) { i -> c.append("a1", "conv1", "m$i", if (i % 2 == 0) "user" else "assistant", "内容".repeat(50) + i) }
         val work = c.claimCompression(assistantId = "a1", thresholdChars = 100, tailEntries = 2)
         assertNotNull(work)
         c.failCompression(work!!)
@@ -134,7 +134,7 @@ class CrossWindowMemoryCoreTest {
     @Test
     fun `expired lease allows recompression`() {
         val c = core()
-        repeat(6) { i -> c.append("a1", "conv1", "m$i", "user", "内容".repeat(50) + i) }
+        repeat(6) { i -> c.append("a1", "conv1", "m$i", if (i % 2 == 0) "user" else "assistant", "内容".repeat(50) + i) }
         c.claimCompression(assistantId = "a1", thresholdChars = 100, tailEntries = 2)
         now += 10 * 60 * 1000L + 1
         assertNotNull(c.claimCompression(assistantId = "a1", thresholdChars = 100, tailEntries = 2))

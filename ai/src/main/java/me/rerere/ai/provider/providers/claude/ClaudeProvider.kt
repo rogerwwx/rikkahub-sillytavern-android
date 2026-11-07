@@ -894,12 +894,12 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                 "tool_use" -> {
                     val id = block["id"]?.jsonPrimitive?.contentOrNull ?: ""
                     val name = block["name"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val input = block["input"]?.jsonObject ?: JsonObject(emptyMap())
+                    val input = block["input"]?.jsonObject
                     parts.add(
                         UIMessagePart.Tool(
                             toolCallId = id,
                             toolName = name,
-                            input = if (input.isEmpty()) "" else json.encodeToString(input),
+                            input = input?.let { json.encodeToString(it) }.orEmpty(),
                             output = emptyList()
                         )
                     )

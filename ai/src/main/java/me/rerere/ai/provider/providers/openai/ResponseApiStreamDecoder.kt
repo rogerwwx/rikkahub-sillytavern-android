@@ -15,6 +15,8 @@ import me.rerere.ai.ui.OpenAIReasoningMetadata
 import me.rerere.ai.ui.ReasoningType
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.StreamCompletion
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.json
 import me.rerere.ai.util.parseErrorDetail
@@ -30,7 +32,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
         val payload = json.parseToJsonElement(event.data).jsonObject
         val eventType = payload["type"]?.jsonPrimitive?.contentOrNull
         val chunks = parseEvent(payload)
-        val completed = eventType == "response.completed" || eventType == "response.incomplete" ||
+        val completed = eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.failed" ||
             event.event == "response.completed" || event.event == "response.incomplete"
         return DecodeResult(chunks, completed)
     }
@@ -218,6 +220,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
                 finishReason = finishReason,
                 responseId = response?.get("id")?.jsonPrimitive?.contentOrNull,
                 model = response?.get("model")?.jsonPrimitive?.contentOrNull,
+                completion = protocolCompletion(finishReason),
             ))
         }
     }
@@ -396,6 +399,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
             finishReason: String? = null,
             responseId: String? = null,
             model: String? = null,
+            completion: StreamCompletion = StreamCompletion.UNKNOWN,
         ): List<StreamChunk> {
             if (finished) return emptyList()
             finished = true
@@ -408,7 +412,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
                 openImageIds.toList().forEach { addAll(endImage(it)) }
                 openToolIds.toList().forEach { addAll(endTool(it)) }
                 openServerToolIds.clear()
-                add(StreamChunk.Finish(finishReason, responseId, model))
+                add(StreamChunk.Finish(finishReason, responseId, model, completion))
             }
         }
     }

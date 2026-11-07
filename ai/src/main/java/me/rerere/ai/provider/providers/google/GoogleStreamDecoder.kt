@@ -17,6 +17,7 @@ import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -59,7 +60,9 @@ internal class GoogleStreamDecoder(
     private fun finish(): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
-        return streamState.finish(finishReason, responseId, model)
+        return streamState.finish(finishReason, responseId, model).map { chunk ->
+            if (chunk is StreamChunk.Finish) chunk.copy(completion = protocolCompletion(finishReason)) else chunk
+        }
     }
 
     private fun parseMessage(content: JsonObject, groundingMetadata: JsonObject?): UIMessage = UIMessage(

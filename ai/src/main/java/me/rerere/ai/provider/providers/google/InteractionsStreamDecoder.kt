@@ -9,6 +9,8 @@ import me.rerere.ai.provider.stream.StreamChunkDecoder
 import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.StreamCompletion
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.json
 import me.rerere.ai.util.parseErrorDetail
@@ -29,6 +31,7 @@ internal class InteractionsStreamDecoder(
     private var model: String? = null
     private var status: String? = null
     private var finished = false
+    private var hasClientToolCalls = false
 
     override fun accept(event: SseEvent): DecodeResult {
         if (finished) return DecodeResult(completed = true)
@@ -54,7 +57,7 @@ internal class InteractionsStreamDecoder(
                         parseInteractionsUsage(interaction?.get("usage")?.jsonObjectOrNull)?.let {
                             add(StreamChunk.Usage(it))
                         }
-                        addAll(finish())
+                        addAll(finish(protocolComplete = true))
                     },
                     completed = true,
                 )
@@ -86,6 +89,7 @@ internal class InteractionsStreamDecoder(
         val index = payload["index"]?.jsonPrimitiveOrNull?.intOrNull ?: return emptyList()
         val step = payload["step"]?.jsonObjectOrNull ?: return emptyList()
         val type = step.stringOrNull("type") ?: return emptyList()
+        if (type == "function_call") hasClientToolCalls = true
         val state = StepState(index, type, step).also { steps[index] = it }
 
         return when {
@@ -222,7 +226,7 @@ internal class InteractionsStreamDecoder(
             val metadata = interactionsSignatureMetadata(state.signature)
             // 非增量返回时参数直接放在 step.start 的 arguments 里
             val initialArguments = state.raw["arguments"]?.jsonObjectOrNull
-                ?.takeIf { !state.hasArgumentsDelta && it.isNotEmpty() }
+                ?.takeIf { !state.hasArgumentsDelta }
             if (initialArguments != null || metadata != null) {
                 add(StreamChunk.ToolCallDelta(
                     id = id,
@@ -249,14 +253,15 @@ internal class InteractionsStreamDecoder(
         else -> emptyList()
     }
 
-    private fun finish(): List<StreamChunk> {
+    private fun finish(protocolComplete: Boolean = false): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
         return buildList {
             // 连接提前断开时，未完成的服务端工具结果没有可回传的内容，不物化
             steps.values.filterNot { isInteractionsServerToolResult(it.type) }.forEach { addAll(closeStep(it)) }
             steps.clear()
-            add(StreamChunk.Finish(status, interactionId, model ?: fallbackModel))
+            add(StreamChunk.Finish(status, interactionId, model ?: fallbackModel,
+                if (protocolComplete) protocolCompletion(status, hasClientToolCalls) else StreamCompletion.UNKNOWN))
         }
     }
 

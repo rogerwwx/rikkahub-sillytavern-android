@@ -132,6 +132,8 @@ class OpenAIProvider(
         )
     }
 
+    override val supportsEmbedding: Boolean = true
+
     override suspend fun generateEmbedding(
         providerSetting: ProviderSetting.OpenAI,
         params: EmbeddingGenerationParams
@@ -168,14 +170,8 @@ class OpenAIProvider(
 
         val bodyStr = response.body?.string() ?: ""
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
-        val data = bodyJson["data"]?.jsonArray ?: error("No data in response")
         val model = bodyJson["model"]?.jsonPrimitive?.contentOrNull ?: params.model.modelId
-
-        val embeddings = data.map { embeddingJson ->
-            val embeddingArray = embeddingJson.jsonObject["embedding"]?.jsonArray
-                ?: error("No embedding in response")
-            embeddingArray.map { it.jsonPrimitive.content.toFloat() }
-        }
+        val embeddings = parseEmbeddingResponse(bodyJson, params.input.size, params.dimensions)
 
         EmbeddingGenerationResult(
             model = model,

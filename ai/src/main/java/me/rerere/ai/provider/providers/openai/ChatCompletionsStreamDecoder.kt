@@ -14,6 +14,7 @@ import me.rerere.ai.provider.stream.DecodeResult
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.provider.stream.StreamChunkDecoder
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.protocolCompletion
 import me.rerere.ai.ui.OpenRouterReasoningMetadata
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
@@ -90,7 +91,9 @@ internal class ChatCompletionsStreamDecoder(
     private fun finish(): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
-        return streamState.finish(finishReason, responseId, responseModel)
+        return streamState.finish(finishReason, responseId, responseModel).map { chunk ->
+            if (chunk is StreamChunk.Finish) chunk.copy(completion = protocolCompletion(finishReason)) else chunk
+        }
     }
 
     private fun parseMessage(payload: JsonObject): UIMessage {

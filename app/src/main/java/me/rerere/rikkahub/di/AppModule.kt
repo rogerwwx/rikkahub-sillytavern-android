@@ -23,9 +23,18 @@ import me.rerere.rikkahub.web.WebServerManager
 import me.rerere.tts.provider.TTSManager
 import okhttp3.OkHttpClient
 import org.koin.dsl.module
+import org.koin.core.module.dsl.viewModel
 
 val appModule = module {
     single<Json> { JsonInstant }
+
+    viewModel { (id: String) ->
+        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryVM(id, get(), get(), get(), get(), get())
+    }
+
+    viewModel { (id: String) ->
+        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticDreamSettingsVM(id, get(), get(), get())
+    }
 
     single {
         AppEventBus()
@@ -97,6 +106,7 @@ val appModule = module {
         ChatToolFactory(
             context = get(),
             memoryRepository = get(),
+            semanticMemoryRepository = get(),
             conversationRepository = get(),
             localTools = get(),
             mcpManager = get(),
@@ -113,8 +123,10 @@ val appModule = module {
             settingsStore = get(),
             conversationRepo = get(),
             memoryRepository = get(),
+            semanticMemoryRepository = get(),
             generationLoop = get(),
             memoryConsolidationScheduler = get(),
+            usageRecorder = get(),
             translationHandler = get(),
             templateTransformer = get(),
             providerManager = get(),

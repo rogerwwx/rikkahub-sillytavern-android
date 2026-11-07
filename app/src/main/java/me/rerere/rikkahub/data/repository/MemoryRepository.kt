@@ -1,10 +1,13 @@
 package me.rerere.rikkahub.data.repository
 
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import me.rerere.rikkahub.data.db.dao.MemoryDAO
+import me.rerere.rikkahub.data.db.AppDatabase
+import me.rerere.rikkahub.data.db.entity.MemoryConsolidationEntity
 import me.rerere.rikkahub.data.db.entity.MemoryFileEntity
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.MemoryFile
@@ -33,6 +36,38 @@ class MemoryRepository(private val memoryDAO: MemoryDAO) {
 
     // 读取、校验版本、写入必须一起完成，否则两个写入方会互相覆盖
     private val writeLock = Mutex()
+
+    suspend fun createDraft(memoryId: String): MemoryDraft = writeLock.withLock {
+        MemoryDraft(this, memoryId, memoryDAO.getFilesOfAssistant(memoryId))
+    }
+
+    /** 调用方须先在来源锁内确认对话；内容版本检查、记忆和进度写入共用一个本库事务。 */
+    suspend fun commitDraft(
+        database: AppDatabase,
+        draft: MemoryDraft,
+        progress: List<MemoryConsolidationEntity>,
+        expectedProgress: Map<String, Long?> = emptyMap(),
+    ): List<MemoryFile> = writeLock.withLock {
+        check(draft.owner === this && !draft.committed) { "草稿已提交或不属于当前记忆库" }
+        val final = draft.dao.getFilesOfAssistant(draft.memoryId)
+        database.withTransaction {
+            val current = memoryDAO.getFilesOfAssistant(draft.memoryId)
+            check(current.associateBy { it.path } == draft.initial.associateBy { it.path }) {
+                "记忆库在整理期间已变化，请重新整理"
+            }
+            val progressDao = database.memoryConsolidationDao()
+            expectedProgress.forEach { (id, expected) ->
+                check(progressDao.getConsolidatedAt(id) == expected) { "整理进度已变化，请重新整理" }
+            }
+            val initial = draft.initial.associateBy { it.path }
+            val remaining = final.associateBy { it.path }
+            memoryDAO.upsertFiles(final.filter { it.content != initial[it.path]?.content })
+            (initial.keys - remaining.keys).forEach { memoryDAO.deleteFile(draft.memoryId, it) }
+            progress.forEach { progressDao.upsert(it) }
+        }
+        draft.committed = true
+        final.map { it.toMemoryFile() }
+    }
 
     fun getFilesFlow(assistantId: String): Flow<List<MemoryFile>> =
         memoryDAO.getFilesOfAssistantFlow(assistantId).map { entities -> entities.map { it.toMemoryFile() } }
@@ -99,13 +134,13 @@ class MemoryRepository(private val memoryDAO: MemoryDAO) {
         MemoryWriteResult.Success(null)
     }
 
-    suspend fun deleteFilesOfAssistant(assistantId: String) {
+    suspend fun deleteFilesOfAssistant(assistantId: String) = writeLock.withLock {
         memoryDAO.deleteFilesOfAssistant(assistantId)
     }
 
-    suspend fun copyFiles(fromAssistantId: String, toAssistantId: String) {
+    suspend fun copyFiles(fromAssistantId: String, toAssistantId: String) = writeLock.withLock {
         val files = memoryDAO.getFilesOfAssistant(fromAssistantId)
-        if (files.isEmpty()) return
+        if (files.isEmpty()) return@withLock
         memoryDAO.upsertFiles(files.map { it.copy(assistantId = toAssistantId) })
     }
 

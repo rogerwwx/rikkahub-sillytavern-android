@@ -196,7 +196,21 @@ class CrossWindowMemoryCore(
         ) {
             return null
         }
-        val prefix = uncompressed.dropLast(tailEntries.coerceAtLeast(1))
+        // 尾部条目数是下限。交错窗口可能把用户消息与其回复分开，按每个窗口的完整轮次退回切点。
+        var prefixEnd = (uncompressed.size - tailEntries.coerceAtLeast(1)).coerceAtLeast(0)
+        while (prefixEnd > 0) {
+            val unfinished = mutableMapOf<String, Int>()
+            for (index in 0 until prefixEnd) {
+                val entry = uncompressed[index]
+                when (entry.role) {
+                    "user" -> unfinished.putIfAbsent(entry.conversationId, index)
+                    "assistant" -> unfinished.remove(entry.conversationId)
+                }
+            }
+            prefixEnd = unfinished.values.minOrNull() ?: break
+        }
+        if (prefixEnd == 0) return null
+        val prefix = uncompressed.take(prefixEnd)
         val work = CompressionWork(
             assistantId = assistantId,
             previousSummary = previous?.text.orEmpty(),

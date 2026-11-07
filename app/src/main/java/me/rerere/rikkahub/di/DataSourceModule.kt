@@ -66,6 +66,13 @@ val dataSourceModule = module {
         SettingsStore(context = get(), scope = get())
     }
 
+    single { me.rerere.rikkahub.data.memory.semantic.SemanticMemoryDatabase.create(get()) }
+    single {
+        me.rerere.rikkahub.data.memory.semantic.SemanticMemoryRepository(
+            database = get(), settingsStore = get(), providerManager = get(), context = get(),
+        )
+    }
+
     single {
         val context: Context = get()
         Room.databaseBuilder(context, AppDatabase::class.java, "rikka_hub")
@@ -254,6 +261,19 @@ val dataSourceModule = module {
         )
     }
 
+    single { me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist(get(), get()) }
+
+    single(createdAtStart = true) {
+        me.rerere.rikkahub.data.memory.semantic.SemanticDreamManager(get(), get(), get(), get(), get(), get())
+    }
+
+    single {
+        me.rerere.rikkahub.data.memory.semantic.SemanticDreamScheduler(
+            scope = get<AppScope>(), context = get(), settingsStore = get(), manager = get(), repository = get(),
+            keepAlive = memoryDreamKeepAlive(get<Context>()),
+        )
+    }
+
     single {
         me.rerere.rikkahub.data.memory.CrossWindowMemoryStore(get())
     }
@@ -270,6 +290,8 @@ val dataSourceModule = module {
             providerManager = get(),
             json = get(),
             memoryRepo = get(),
+            semanticMemoryRepo = get(),
+            semanticJevAssist = get(),
             conversationRepo = get(),
             pluginToolProvider = get(),
         )
@@ -283,6 +305,7 @@ val dataSourceModule = module {
             conversationRepo = get(),
             consolidationDao = get(),
             settingsStore = get(),
+            database = get(),
         )
     }
 
@@ -292,6 +315,7 @@ val dataSourceModule = module {
             worker = get<MemoryConsolidator>(),
             keepAlive = memoryDreamKeepAlive(get<Context>()),
             isAppVisible = { ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) },
+            semanticScheduler = get(),
         )
     }
 
@@ -403,7 +427,12 @@ val dataSourceModule = module {
         ProviderManager(client = get(), context = get(), accountCredentials = get<ProviderAccountManager>())
     }
 
-    single { BackupManager(context = get(), database = get(), settingsStore = get(), json = get()) }
+    single {
+        BackupManager(
+            context = get(), database = get(), settingsStore = get(), json = get(),
+            semanticDatabase = get(), conversationRepository = get(),
+        )
+    }
 
     single {
         WebDavSync(

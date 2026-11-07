@@ -51,6 +51,8 @@ data class UIMessage(
     // 请求期间生成的内部消息；该标记仅在内存中使用
     @Transient
     val isSynthetic: Boolean = false,
+    // 普通聊天可保留截断预览；后台来源只消费正常完成的新回复。
+    val generationCompletion: StreamCompletion? = null,
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->

@@ -58,6 +58,12 @@ data class Conversation(
                 .filterNot { message -> message.isContextHidden }
         }
 
+    fun messagesBeforeNode(nodeId: Uuid): List<UIMessage> {
+        val index = messageNodes.indexOfFirst { it.id == nodeId }
+        require(index >= 0) { "生成边界节点已不存在" }
+        return messageNodes.take(index).map { it.currentMessage }.filterNot { it.isContextHidden }
+    }
+
     fun getMessageNodeByMessage(message: UIMessage): MessageNode? {
         return messageNodes.firstOrNull { node -> node.messages.contains(message) }
     }
@@ -68,10 +74,15 @@ data class Conversation(
 
     fun updateCurrentMessages(messages: List<UIMessage>): Conversation {
         val newNodes = this.messageNodes.toMutableList()
+        val nodeIndexes = mutableMapOf<Uuid, Int>()
+        newNodes.forEachIndexed { index, node -> node.messages.forEach { nodeIndexes[it.id] = index } }
+        val visibleNodeIndexes = newNodes.indices.filter { !newNodes[it].currentMessage.isContextHidden }
 
         messages.forEachIndexed { index, message ->
+            // 生成输入只含可见消息；已有消息按稳定ID定位，新分支才沿可见节点对齐。
+            val nodeIndex = nodeIndexes[message.id] ?: visibleNodeIndexes.getOrNull(index) ?: newNodes.size
             val node = newNodes
-                .getOrElse(index) { message.toMessageNode() }
+                .getOrElse(nodeIndex) { message.toMessageNode() }
 
             val newMessages = node.messages.toMutableList()
             var newMessageIndex = node.selectIndex
@@ -88,11 +99,12 @@ data class Conversation(
             )
 
             // 更新newNodes
-            if (index > newNodes.lastIndex) {
+            if (nodeIndex > newNodes.lastIndex) {
                 newNodes.add(newNode)
             } else {
-                newNodes[index] = newNode
+                newNodes[nodeIndex] = newNode
             }
+            nodeIndexes[message.id] = nodeIndex
         }
 
         return this.copy(

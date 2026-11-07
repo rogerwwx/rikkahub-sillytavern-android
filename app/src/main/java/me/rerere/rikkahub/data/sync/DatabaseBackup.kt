@@ -92,7 +92,7 @@ internal object DatabaseBackup {
         removeSidecars(databaseFile)
     }
 
-    private inline fun <T> open(
+    inline fun <T> open(
         context: Context,
         databaseFile: File,
         flags: Int,

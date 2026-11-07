@@ -20,6 +20,22 @@ class MemoryRepositoryTest {
     }
 
     @Test
+    fun `draft writes are isolated and later steps read their own changes`() = runBlocking {
+        val original = create("/profile.md", "original")
+        val draft = repository.createDraft(assistant)
+        val written = draft.repository.writeFile(assistant, original.path, "draft", original.version)
+            as MemoryWriteResult.Success
+        assertEquals("draft", draft.repository.getFile(assistant, original.path)?.content)
+        assertEquals("original", repository.getFile(assistant, original.path)?.content)
+        assertTrue(draft.repository.appendToFile(assistant, original.path, "second", original.version)
+            is MemoryWriteResult.Conflict)
+        assertTrue(draft.repository.appendToFile(assistant, original.path, "second", written.file!!.version)
+            is MemoryWriteResult.Success)
+        assertEquals("original", repository.getFile(assistant, original.path)?.content)
+        assertEquals("draft\nsecond\n", draft.repository.getFile(assistant, original.path)?.content)
+    }
+
+    @Test
     fun `creating a file that already exists returns the current content`() = runBlocking {
         val file = create("/topics/food.md", "- [stated] Likes noodles\n")
 

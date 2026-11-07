@@ -277,6 +277,12 @@ internal fun AssistantBasicContent(
                 supportingContent = { Text(stringResource(R.string.assistant_page_stream_output_desc)) },
                 headlineContent = { Text(stringResource(R.string.assistant_page_stream_output)) },
             )
+            switchItem(
+                checked = assistant.compressionMemoryStream,
+                onCheckedChange = { onUpdate(assistant.copy(compressionMemoryStream = it)) },
+                supportingContent = { Text(stringResource(R.string.assistant_page_compression_memory_stream_desc)) },
+                headlineContent = { Text(stringResource(R.string.assistant_page_compression_memory_stream)) },
+            )
         }
 
         CardGroup {

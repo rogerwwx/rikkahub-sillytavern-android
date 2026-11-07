@@ -40,6 +40,7 @@ import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.model.*
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.transformers.PlaceholderTransformer
+import me.rerere.rikkahub.data.ai.bindResponseTo
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.ui.components.ai.ChatInput
@@ -61,15 +62,14 @@ private fun buildHistoryWithNames(
     speakerMap: Map<Uuid, Uuid>,
     members: List<Assistant>,
 ): List<UIMessage> {
-    return messageNodes.map { node ->
+    return messageNodes.filterNot { it.currentMessage.isContextHidden }.map { node ->
         val speakerId = speakerMap[node.id]
         val speaker = members.find { it.id == speakerId }
         val namePrefix = if (speaker != null && node.role != MessageRole.USER) {
             "${speaker.name}:\n"
         } else ""
         val text = messageText(node)
-        UIMessage(
-            role = node.role,
+        node.currentMessage.copy(
             parts = listOf(UIMessagePart.Text("$namePrefix$text")),
         )
     }
@@ -168,19 +168,12 @@ private suspend fun regenerateGroupMessage(
             prompt = prompt,
             history = historyWithoutLast,
             conversationId = convId,
-            onChunk = { partialText, parts ->
+            onMessage = { generated ->
                 chatService.updateConversationState(convId) { c ->
                     val nodes = c.messageNodes.toMutableList()
                     val i2 = nodes.indexOfLast { it.id == placeholderNode.id }
                     if (i2 >= 0) {
-                        val updatedMsg = if (parts != null) {
-                            UIMessage(
-                                role = me.rerere.ai.core.MessageRole.ASSISTANT,
-                                parts = parts,
-                            )
-                        } else {
-                            UIMessage.assistant(partialText)
-                        }
+                        val updatedMsg = generated.bindResponseTo(placeholderNode.currentMessage)
                         nodes[i2] = MessageNode(id = placeholderNode.id, messages = listOf(updatedMsg))
                     }
                     c.copy(messageNodes = nodes)
@@ -562,20 +555,13 @@ fun GroupChatPage(groupId: String) {
                                                     prompt = text,
                                                     history = historyWithoutLastUser,
                                                     conversationId = currentConvId,
-                                                    onChunk = { partialText, parts ->
+                                                    onMessage = { generated ->
                                                         // 实时更新占位消息的内容
                                                         chatService.updateConversationState(currentConvId) { conv ->
                                                             val nodes = conv.messageNodes.toMutableList()
                                                             val idx2 = nodes.indexOfLast { it.id == placeholderNode.id }
                                                             if (idx2 >= 0) {
-                                                                val updatedMsg = if (parts != null) {
-                                                                    UIMessage(
-                                                                        role = me.rerere.ai.core.MessageRole.ASSISTANT,
-                                                                        parts = parts,
-                                                                    )
-                                                                } else {
-                                                                    UIMessage.assistant(partialText)
-                                                                }
+                                                                val updatedMsg = generated.bindResponseTo(placeholderNode.currentMessage)
                                                                 nodes[idx2] = MessageNode(
                                                                     id = placeholderNode.id,
                                                                     messages = listOf(updatedMsg),
@@ -1179,19 +1165,12 @@ private suspend fun runAutoChat(
                     prompt = prompt,
                     history = historyWithoutLast,
                     conversationId = convId,
-                    onChunk = { partialText, parts ->
+                    onMessage = { generated ->
                         chatService.updateConversationState(convId) { c ->
                             val nodes = c.messageNodes.toMutableList()
                             val i2 = nodes.indexOfLast { it.id == placeholderNode.id }
                             if (i2 >= 0) {
-                                val updatedMsg = if (parts != null) {
-                                    UIMessage(
-                                        role = me.rerere.ai.core.MessageRole.ASSISTANT,
-                                        parts = parts,
-                                    )
-                                } else {
-                                    UIMessage.assistant(partialText)
-                                }
+                                val updatedMsg = generated.bindResponseTo(placeholderNode.currentMessage)
                                 nodes[i2] = MessageNode(id = placeholderNode.id, messages = listOf(updatedMsg))
                             }
                             c.copy(messageNodes = nodes)

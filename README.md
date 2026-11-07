@@ -150,14 +150,15 @@ Drawing on the DeepSeek Harness prefix-stability design, this fork eliminates th
 
 ### 🧿 Jev decisioning (TypeSafe System One)
 
-Settings → HuaDeng Settings → **Jev decisioning**. Jev is a dedicated small model that **only judges — it never generates text** (~100ms end to end, output tokens free). It mounts as an invisible decision layer inside the client: paste an API key and it works. Two takeover switches:
+Settings → HuaDeng Settings → **Jev decisioning** configures the shared TypeSafe `/v1/systemone` connection and the main model's judge tool. Jev **only judges — it never generates text**. Optional semantic memory assistance is configured per assistant in Semantic memory → Dreaming settings and is off by default:
 
 | Switch | What it does |
 |---|---|
-| **Automatic memory screening** | Instead of embedding-similarity retrieval, Jev judges each memory "is this relevant to the current conversation?" — no embedding API calls. Candidates are batched in parallel newest-first; anything over 50% relevance probability is injected; identity memories (what to call you, preferences) count as relevant even when not mentioned |
+| **Recall candidate screening** | After base BM25 + vector retrieval, Jev checks whether a small candidate set actually helps answer the current input. Embedding remains in use; yes/no probability thresholds are separate, and uncertainty or failure falls back per candidate |
+| **Dream draft review** | After a complete draft is generated, optional value and source-support judgments screen candidates. Program validation still controls evidence, versions, core protection and fact replacement |
 | **judge tool for the main model** | Gives the main model a `judge` tool (shown as "Jev 明断" in the UI): when unsure about a yes/no, multiple-choice, or rating question it asks Jev instead of guessing. A tool-routing note is injected into the system prompt so weaker models discover it too |
 
-**Silence is a hard requirement**: whenever Jev is unavailable (no key, network failure, low confidence), memory and tools fall back to the original logic — no error dialogs, no blocking.
+Failures and uncertain answers fall back without interrupting chat. Semantic assistance records retained/excluded candidates, failures and additional time in the assistant's diagnostics. Noul is yes probability and has no separate confidence; Choice and Score use their own option or level distributions. The semantic extensions are implemented in source; Android background behavior and real Jev quality still require verification.
 
 ### 🧩 Plugin System
 
@@ -524,7 +525,7 @@ Five entries: WeChat Bot, QQ Bot, AI proactive messaging, Security settings, and
 
 ### Jev decisioning
 
-The configuration page for the TypeSafe System One judge model: API base URL / key / model name, a confidence-threshold slider, and the two takeover switches (automatic memory screening, judge tool). See [Jev decisioning](#-jev-decisioning-typesafe-system-one).
+The shared TypeSafe System One connection page provides API base URL / key / model name and the generic judge tool threshold and switch. Semantic recall screening and dream review have separate, default-off assistant settings and business thresholds. See [Jev decisioning](#-jev-decisioning-typesafe-system-one).
 
 ---
 
