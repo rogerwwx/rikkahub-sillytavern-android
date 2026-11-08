@@ -146,6 +146,16 @@
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
     </activity-alias>
+    <!-- AI 浏览器代理：独立全屏 Activity，主界面零布局侵入 -->
+    <activity
+      android:name=".browser.BrowserActivity"
+      android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|uiMode|density"
+      android:exported="false"
+      android:hardwareAccelerated="true"
+      android:label="@string/browser_activity_label"
+      android:launchMode="singleTask"
+      android:theme="@style/Theme.Rikkahub.Browser"
+      android:windowSoftInputMode="adjustResize" />
     <activity
       android:name=".ui.activity.SafeModeActivity"
       android:exported="false"
@@ -231,7 +241,7 @@
       android:foregroundServiceType="dataSync">
     </service>
 
-    <!-- 手机控制：无障碍读屏 + 手势，供 phone_screen / phone_act / phone_find 使用 -->
+    <!-- 手机控制：无障碍读屏 + 手势 -->
     <service
       android:name=".service.phone.PhoneAccessibilityService"
       android:exported="true"

@@ -41,7 +41,7 @@ val appModule = module {
     }
 
     single {
-        LocalTools(get(), get(), get(), get())
+        LocalTools(get(), get(), get(), get(), get(), get())
     }
 
     // 微信 Bot / QQ Bot API 客户端（复用全局 OkHttpClient，各自按需覆写超时）

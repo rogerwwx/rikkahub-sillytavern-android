@@ -9,6 +9,7 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.ImageGenSize
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.mediagen.provider.MediaGenerationProviderSetting
+import me.rerere.rikkahub.browser.BrowserSettings
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_COMPRESS_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_OCR_PROMPT
@@ -79,6 +80,8 @@ data class Settings(
     val ocrPrompt: String = DEFAULT_OCR_PROMPT,
     val compressModelId: Uuid = Uuid.random(),
     val compressPrompt: String = DEFAULT_COMPRESS_PROMPT,
+    // 主动消息用的模型；null = 跟随助手的聊天模型
+    val proactiveMessageModelId: Uuid? = null,
     val assistantId: Uuid = DEFAULT_ASSISTANT_ID,
     val providers: List<ProviderSetting> = DEFAULT_PROVIDERS,
     val assistants: List<Assistant> = DEFAULT_ASSISTANTS,
@@ -151,10 +154,11 @@ data class Settings(
     val qqBotSetting: QqBotSetting = QqBotSetting(),                    // QQ Bot（开放平台 WebSocket）
     val proactiveMessageSetting: ProactiveMessageSetting = ProactiveMessageSetting(), // AI 主动发消息
     val securitySetting: SecuritySetting = SecuritySetting(),           // 安全设置（工具调用审批策略）
+    val browserSettings: BrowserSettings = BrowserSettings(),           // AI 浏览器代理（可见的 WebView）
 ) {
     /** 所有全局正则：各分组按列表顺序拼接。派生视图，不单独持久化。 */
     val globalRegexes: List<AssistantRegex>
-        get() = regexGroups.flatMap { it.regexes }
+        get() = regexGroups.flatMap { it.regexes } + me.rerere.rikkahub.plugin.runtime.PluginRegexRegistry.regexes
 
     companion object {
         // 构造一个用于初始化的settings, 但它不能用于保存，防止使用初始值存储
@@ -377,6 +381,8 @@ data class DisplaySetting(
     val bubbleOpacity: Float = 0.9f,
     val showModelIcon: Boolean = true,
     val showModelName: Boolean = true,
+    // 全局用角色卡头像/名字替代模型图标与模型名；关 = 跟随助手自身的开关
+    val useAssistantAvatar: Boolean = false,
     val showDateTimeInMessage: Boolean = false,
     val showTokenUsage: Boolean = true,
     val showThinkingContent: Boolean = true,

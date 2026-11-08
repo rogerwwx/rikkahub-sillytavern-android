@@ -22,6 +22,8 @@ enum class FrontendCardMode {
     AUTO,
     ALWAYS,
     NEVER,
+    // 内置 SillyTavern 前端：酒馆脚本、前端卡、正则都按酒馆那套跑
+    TAVERN,
 }
 
 @Serializable
@@ -87,6 +89,7 @@ data class Assistant(
         LocalToolOption.Calculator,
         LocalToolOption.AskUser,
         LocalToolOption.Clipboard,
+        LocalToolOption.PresentFile,
         LocalToolOption.PythonEngine,
         LocalToolOption.DiffText,
         // 上游自带的图表渲染（原生 Compose，直接显示在聊天里）。
@@ -96,6 +99,9 @@ data class Assistant(
         LocalToolOption.ShowImage,
         // 写代码后先静态检查一遍，比写完直接跑更容易发现低级错误。
         LocalToolOption.CodeCheck,
+        // 让模型能直接改本应用设置、按创造模式写插件（描述很短，不加载也几乎不占上下文）。
+        LocalToolOption.SettingsControl,
+        LocalToolOption.PluginAuthor,
     ),
     val enableWebSearch: Boolean = false, // 网络搜索开关(每个助手独立)
     val workspaceId: Uuid? = null,
@@ -1059,9 +1065,23 @@ val LEGACY_LOCAL_TOOLS: Set<LocalToolOption> = setOf(
 /**
  * 把新工具补进已有助手的配置。见 LEGACY_LOCAL_TOOLS 的说明。
  */
+/**
+ * 本版本全新引入的工具：旧配置里不可能出现过，所以无条件补齐，
+ * 不会覆盖用户主动关掉的选项。
+ */
+val ALWAYS_ADD_LOCAL_TOOLS: List<LocalToolOption> = listOf(
+    LocalToolOption.SettingsControl,
+    LocalToolOption.PluginAuthor,
+    LocalToolOption.PresentFile,
+)
+
 fun Assistant.withNewLocalTools(): Assistant {
-    if (localTools.isNotEmpty() && !LEGACY_LOCAL_TOOLS.containsAll(localTools)) return this
-    val missing = DEFAULT_NEW_LOCAL_TOOLS.filterNot { it in localTools }
+    val missing = buildList {
+        if (localTools.isEmpty() || LEGACY_LOCAL_TOOLS.containsAll(localTools)) {
+            addAll(DEFAULT_NEW_LOCAL_TOOLS.filterNot { it in localTools })
+        }
+        addAll(ALWAYS_ADD_LOCAL_TOOLS.filterNot { it in localTools })
+    }
     if (missing.isEmpty()) return this
     return copy(localTools = localTools + missing)
 }

@@ -106,6 +106,8 @@ import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
 import me.rerere.rikkahub.data.ai.tools.createWorkspaceTools
 import me.rerere.rikkahub.data.ai.tools.createSkillTools
+import me.rerere.rikkahub.data.ai.tools.LazyToolGroups
+import me.rerere.rikkahub.data.ai.tools.buildLoadToolsTool
 import me.rerere.rikkahub.data.ai.tools.createFileTools
 import me.rerere.rikkahub.data.ai.tools.buildAssistantMemoryTools
 import me.rerere.rikkahub.data.ai.tools.createShellTools
@@ -506,6 +508,19 @@ class ChatService(
      */
     fun isGenerating(conversationId: Uuid): Boolean {
         return sessionManager.get(conversationId)?.isGenerating == true
+    }
+
+    /**
+     * 外部（主动消息等后台任务）写库后，把新内容同步进已打开的 session。
+     *
+     * 页面读的是内存 session，只更新数据库不会让聊天窗口刷新，表现为
+     * 「日志显示已发送，窗口里看不到」。这里只同步已存在且空闲的 session，
+     * 不凭空创建，也不碰正在生成的会话。
+     */
+    fun publishConversationUpdate(conversation: Conversation) {
+        val session = sessionManager.get(conversation.id) ?: return
+        if (session.isGenerating) return
+        synchronized(session) { session.updateConversation(conversation) }
     }
 
     fun getGenerationJobStateFlow(conversationId: Uuid): Flow<Job?> {
@@ -1598,10 +1613,9 @@ class ChatService(
                     // 酒馆模式对齐原版酒馆的上下文构成；必须 addAll 打底再删减，
                     // 手写白名单会静默漏掉文档/占位符等基础转换器
                     addAll(inputTransformers)
-
+                    // PromptInjection/AuthorsNote 已在基础列表里，再 add 一次会让世界书、
+                    // 注入文档、作者笔记在同一个请求里拼两遍（实测 B 文档出现两份）
                     add(templateTransformer)
-                    add(PromptInjectionTransformer)
-                    add(AuthorsNoteTransformer)
 
                     if (settings.huadengSettings.enableTavernMode) {
                         // 用户手动上传的文档和写的占位符照常处理，只去掉自动注入类
@@ -1651,6 +1665,8 @@ class ChatService(
                     }
                     addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), conversation.workspaceCwd))
                     addAll(localTools.getTools(assistant.localTools))
+                    LazyToolGroups.register(localTools.getToolGroups(assistant.localTools))
+                    add(buildLoadToolsTool(conversation.id.toString()))
                     if (assistant.localTools.contains(LocalToolOption.ShellTools)) {
                         addAll(createShellTools())
                     }
@@ -2277,6 +2293,8 @@ class ChatService(
                     addAll(createSearchTools(settings))
                 }
                 addAll(localTools.getTools(assistant.localTools))
+                LazyToolGroups.register(localTools.getToolGroups(assistant.localTools))
+                add(buildLoadToolsTool(conversationId.toString()))
                 if (assistant.localTools.contains(LocalToolOption.ShellTools)) {
                     addAll(createShellTools())
                 }
@@ -2319,12 +2337,10 @@ class ChatService(
                 }
             },
             inputTransformers = buildList {
-                // 同上：addAll 打底再按酒馆模式删减
+                // 同上：addAll 打底再按酒馆模式删减；注入/作者笔记不重复注册
                 addAll(inputTransformers)
 
                 add(templateTransformer)
-                add(PromptInjectionTransformer)
-                add(AuthorsNoteTransformer)
 
                 if (settings.huadengSettings.enableTavernMode) {
                     removeAll { it === OcrTransformer }

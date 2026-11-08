@@ -21,6 +21,7 @@ import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.event.AppEvent
+import me.rerere.rikkahub.browser.buildBrowserTools
 import me.rerere.rikkahub.data.ai.tools.phone.buildPhoneTools
 import me.rerere.rikkahub.data.ai.tools.local.buildCalendarCreateTool
 import me.rerere.rikkahub.data.ai.tools.local.buildCalendarQueryTool
@@ -160,10 +161,25 @@ sealed class LocalToolOption {
     @SerialName("sub_agent")
     data object SubAgent : LocalToolOption()
 
-    /** 手机控制：无障碍读屏 + 点击/输入/滚动（phone_screen / phone_act / phone_find）。 */
+    /** 手机控制：无障碍读屏 + 元素级点击/输入/滚动/按键/截图。 */
     @Serializable
     @SerialName("phone_control")
     data object PhoneControl : LocalToolOption()
+
+    /** AI 浏览器代理：可见的 WebView + 快照/点击/输入/截图一组工具。 */
+    @Serializable
+    @SerialName("browser_agent")
+    data object BrowserAgent : LocalToolOption()
+
+    /** 设置控制：分级懒加载读写应用设置。 */
+    @Serializable
+    @SerialName("settings_control")
+    data object SettingsControl : LocalToolOption()
+
+    /** 创造模式：让模型直接写/装/导出/删除插件。 */
+    @Serializable
+    @SerialName("plugin_author")
+    data object PluginAuthor : LocalToolOption()
 }
 
 class LocalTools(
@@ -171,6 +187,8 @@ class LocalTools(
     private val eventBus: AppEventBus,
     private val ttsManager: TTSManager,
     private val settingsStore: SettingsStore,
+    private val pluginManager: me.rerere.rikkahub.plugin.manager.PluginManager,
+    private val pluginSettingsService: me.rerere.rikkahub.plugin.settings.PluginSettingsService,
 ) {
     // ── Persistent JS engine ──
     private var jsExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -483,6 +501,10 @@ class LocalTools(
     val showImageTool by lazy { buildShowImageTool(context) }
     val codeCheckTool by lazy { buildCodeCheckTool(context) }
 
+    /** 按选项分组：懒加载按组登记，模型只在需要时加载 */
+    fun getToolGroups(options: List<LocalToolOption>): Map<String, List<Tool>> =
+        options.distinct().associate { it.groupId() to getTools(listOf(it)) }
+
     fun getTools(options: List<LocalToolOption>): List<Tool> {
         val tools = mutableListOf<Tool>()
         if (options.contains(LocalToolOption.JavascriptEngine)) {
@@ -530,7 +552,24 @@ class LocalTools(
 
         // 手机控制工具直连注册，不走 device_toolbox 二级分发，省每步一次往返
         if (options.contains(LocalToolOption.PhoneControl)) {
-            tools.addAll(buildPhoneTools())
+            tools.addAll(buildPhoneTools(context))
+        }
+
+        // AI 浏览器代理：只在助手开关打开时注册，全局开关在工具内部再判一次
+        if (options.contains(LocalToolOption.BrowserAgent)) {
+            tools.addAll(buildBrowserTools(context, settingsStore))
+        }
+        if (options.contains(LocalToolOption.SettingsControl)) {
+            tools.add(
+                buildSettingsControlTool(
+                    settingsStore = settingsStore,
+                    patchRecorder = pluginSettingsService,
+                    onPatchCreated = { pluginManager.refreshPlugins() },
+                )
+            )
+        }
+        if (options.contains(LocalToolOption.PluginAuthor)) {
+            tools.add(buildPluginAuthorTool(context, pluginManager))
         }
         return tools
     }
@@ -548,4 +587,37 @@ fun deduplicateTools(tools: List<Tool>): List<Tool> {
 private fun guessMimeType(fileName: String): String {
     val ext = fileName.substringAfterLast('.', "").lowercase()
     return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+}
+
+/** 懒加载分组名 */
+fun LocalToolOption.groupId(): String = when (this) {
+    LocalToolOption.JavascriptEngine -> "javascript"
+    LocalToolOption.TimeInfo -> "time"
+    LocalToolOption.Clipboard -> "clipboard"
+    LocalToolOption.Tts -> "tts"
+    LocalToolOption.AskUser -> "ask_user"
+    LocalToolOption.PresentFile -> "present"
+    LocalToolOption.PythonEngine -> "python"
+    LocalToolOption.FileTools -> "file"
+    LocalToolOption.ShellTools -> "shell"
+    LocalToolOption.DatabaseQuery -> "database"
+    LocalToolOption.TaskTools -> "task"
+    LocalToolOption.Calculator -> "calculator"
+    LocalToolOption.WorkerTools -> "worker"
+    LocalToolOption.TeammateTools -> "teammate"
+    LocalToolOption.SendMessage -> "send_message"
+    LocalToolOption.ScreenTime -> "screen_time"
+    LocalToolOption.Calendar -> "calendar"
+    LocalToolOption.DeviceToolbox -> "device"
+    LocalToolOption.LifeCompanion -> "life"
+    LocalToolOption.CoupleSpace -> "couple"
+    LocalToolOption.ChartDisplay -> "chart"
+    LocalToolOption.DiffText -> "diff"
+    LocalToolOption.ShowImage -> "image"
+    LocalToolOption.CodeCheck -> "code"
+    LocalToolOption.SubAgent -> "subagent"
+    LocalToolOption.PhoneControl -> "phone"
+    LocalToolOption.BrowserAgent -> "browser"
+    LocalToolOption.SettingsControl -> "settings"
+    LocalToolOption.PluginAuthor -> "plugin"
 }

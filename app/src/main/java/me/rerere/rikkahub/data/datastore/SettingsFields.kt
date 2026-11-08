@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.rikkahub.data.ai.prompts.TITLE_PROMPT_REVISION
+import me.rerere.rikkahub.browser.BrowserSettings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.parseAuthorNotePosition
 import me.rerere.rikkahub.data.model.withNewLocalTools
@@ -106,6 +107,7 @@ internal val SETTINGS_FIELDS: List<SettingsField<*, *>> = with(SettingsStore) {
             { copy(proactiveMessageSetting = it) }, ::ProactiveMessageSetting,
         ),
         jsonSafe(SECURITY_SETTING, Settings::securitySetting, { copy(securitySetting = it) }, ::SecuritySetting),
+        jsonSafe(BROWSER_SETTINGS, Settings::browserSettings, { copy(browserSettings = it) }, ::BrowserSettings),
         plain(DEVELOPER_MODE, Settings::developerMode) { copy(developerMode = it) },
 
         // 模型选择
@@ -156,6 +158,12 @@ internal val SETTINGS_FIELDS: List<SettingsField<*, *>> = with(SettingsStore) {
         plain(OCR_PROMPT, Settings::ocrPrompt) { copy(ocrPrompt = it) },
         uuid(COMPRESS_MODEL, Settings::compressModelId) { copy(compressModelId = it) },
         plain(COMPRESS_PROMPT, Settings::compressPrompt) { copy(compressPrompt = it) },
+        SettingsField(
+            PROACTIVE_MESSAGE_MODEL, Settings::proactiveMessageModelId,
+            { copy(proactiveMessageModelId = it) },
+            encode = { it?.toString() },
+            decode = { stored -> stored.takeIf { it.isNotBlank() }?.let { Uuid.parse(it) } },
+        ),
 
         // 提供商
         json(PROVIDERS, Settings::providers) { copy(providers = it) },

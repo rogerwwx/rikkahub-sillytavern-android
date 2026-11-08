@@ -133,6 +133,7 @@ import me.rerere.rikkahub.ui.pages.mediacreation.MediaCreationSessionsPage
 import me.rerere.rikkahub.ui.pages.search.SearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAboutPage
 import me.rerere.rikkahub.ui.pages.setting.SettingCrashLogPage
+import me.rerere.rikkahub.ui.pages.setting.SettingBrowserPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesThemePage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesNotificationPage
@@ -191,6 +192,9 @@ import me.rerere.rikkahub.utils.l10n
 private const val TAG = "RouteActivity"
 private const val ACTION_TRANSLATE = "me.rerere.rikkahub.action.TRANSLATE"
 private const val ACTION_MEDIA_CREATION = "me.rerere.rikkahub.action.MEDIA_CREATION"
+internal const val ACTION_MINI_APP = "me.rerere.rikkahub.action.MINI_APP"
+internal const val EXTRA_MINI_APP_PLUGIN_ID = "miniAppPluginId"
+internal const val EXTRA_MINI_APP_ID = "miniAppId"
 
 class RouteActivity : ComponentActivity() {
     private val okHttpClient by inject<OkHttpClient>()
@@ -283,6 +287,10 @@ class RouteActivity : ComponentActivity() {
                 openNewMediaCreation(backStack)
                 null
             }
+            ACTION_MINI_APP -> Screen.PluginMiniApp(
+                pluginId = intent.getStringExtra(EXTRA_MINI_APP_PLUGIN_ID).orEmpty(),
+                miniAppId = intent.getStringExtra(EXTRA_MINI_APP_ID).orEmpty(),
+            )
             Intent.ACTION_SEND -> Screen.ShareHandler(
                 text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty(),
                 streamUri = intent.getStringExtra(Intent.EXTRA_STREAM),
@@ -719,6 +727,10 @@ class RouteActivity : ComponentActivity() {
                                 SettingSecurityPage()
                             }
 
+                            entry<Screen.SettingBrowser> {
+                                SettingBrowserPage()
+                            }
+
                             entry<Screen.SettingWeixinBot> {
                                 SettingWeixinBotPage()
                             }
@@ -777,6 +789,14 @@ class RouteActivity : ComponentActivity() {
                                     onNavigateToDetail = { pluginId ->
                                         backStack.add(Screen.PluginDetail(pluginId))
                                     },
+                                )
+                            }
+
+                            entry<Screen.PluginMiniApp> { key ->
+                                me.rerere.rikkahub.plugin.ui.PluginMiniAppPage(
+                                    pluginId = key.pluginId,
+                                    miniAppId = key.miniAppId,
+                                    onNavigateBack = { backStack.removeLastOrNull() },
                                 )
                             }
 
@@ -968,7 +988,7 @@ private fun Screen.isSettingScreen(): Boolean = when (this) {
     Screen.SettingMedia, Screen.SettingMcp, Screen.SettingDonate,
     Screen.SettingFiles, Screen.SettingWeb, Screen.SettingTavern,
     Screen.SettingTavernRegex, Screen.SettingHuaDeng, Screen.SettingHuaDengCompat,
-    Screen.SettingJev, Screen.SettingSecurity,
+    Screen.SettingJev, Screen.SettingSecurity, Screen.SettingBrowser,
     Screen.SettingWeixinBot, Screen.SettingQqBot, Screen.SettingProactiveMessage,
     Screen.Persona, Screen.AuthorsNote, Screen.Extensions, Screen.QuickMessages,
     Screen.Prompts, Screen.Skills, Screen.Plugins, Screen.Workspaces,
@@ -1156,6 +1176,9 @@ sealed interface Screen : NavKey {
     data object SettingSecurity : Screen
 
     @Serializable
+    data object SettingBrowser : Screen
+
+    @Serializable
     data object SettingWeixinBot : Screen
 
     @Serializable
@@ -1193,6 +1216,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data class PluginDetail(val pluginId: String) : Screen
+
+    @Serializable
+    data class PluginMiniApp(val pluginId: String, val miniAppId: String) : Screen
 
     @Serializable
     data class WorkspaceFileEditor(val id: String, val area: String, val path: String) : Screen

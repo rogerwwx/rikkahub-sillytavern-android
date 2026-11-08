@@ -244,6 +244,11 @@ class GenerationLoop(
             if (hasTool("web_search", "search_", "scrape_")) add("Web → web_search / web_fetch")
             if (hasTool("memory_semantic_")) add("Memory → memory_semantic_search/save/delete")
             else if (hasTool("memory_tool", "memory_")) add("Memory → memory_tool")
+            // 工具懒加载：其余工具按组放在 load_tools 后面，只在这里点一下组名
+            val lazyGroups = me.rerere.rikkahub.data.ai.tools.LazyToolGroups.availableGroups().keys
+            if (lazyGroups.isNotEmpty()) {
+                add("More tools → load_tools (${lazyGroups.joinToString("/")})")
+            }
         }
         val ethicLines = buildList {
             add("❌ Do NOT describe what you will do — just do it")
@@ -320,7 +325,8 @@ class GenerationLoop(
         // 本轮最终注册的工具名：排查「记忆工具为何不见了」这类问题时，这一行就是答案
         Log.i(TAG, "tools(${if (settings.huadengSettings.enableTavernMode) "tavern" else "normal"}): ${if (isEmpty()) "(none)" else joinToString(", ") { it.name }}")
     }
-    fun trackToolStatus(tools: List<Tool>) = tools.map { tool ->
+    fun trackToolStatus(tools: List<Tool>) =
+        (if (settings.huadengSettings.enableTavernMode) tools else lazyToolsFor(conversationId, tools)).map { tool ->
         if (tool.name == "ask_user") tool else tool.copy(
             execute = { args ->
                 processingStatus.value = describeTool(tool.name)
@@ -649,7 +655,7 @@ class GenerationLoop(
                         async {
                             tool to runCatching {
                                 kotlinx.coroutines.withTimeout(assistant.toolExecTimeout * 1000L) {
-                                    executeToolCall(tool, toolsInternal, json)
+                                    executeToolCall(tool, statusTrackedTools, json)
                                 }
                             }
                         }
@@ -664,7 +670,7 @@ class GenerationLoop(
                 toolsToProcess.forEach { tool ->
                     val result = runCatching {
                         kotlinx.coroutines.withTimeout(assistant.toolExecTimeout * 1000L) {
-                            executeToolCall(tool, toolsInternal, json)
+                            executeToolCall(tool, statusTrackedTools, json)
                         }
                     }
                     addToolResult(executedTools, tool, truncateToolResult(result), json)
@@ -1289,9 +1295,21 @@ class GenerationLoop(
 
 }
 
-/**
- * 执行单个工具调用（提取逻辑以避免并行/串行分支重复）
- */
+/** 懒加载工具：按会话累计已加载的组，未加载的组不进请求 */
+private val lazyLoadToolCache = java.util.concurrent.ConcurrentHashMap<String, Tool>()
+
+internal fun lazyToolsFor(conversationId: Uuid?, tools: List<Tool>): List<Tool> {
+    if (tools.isEmpty()) return tools
+    val key = conversationId?.toString() ?: return tools
+    if (me.rerere.rikkahub.data.ai.tools.LazyToolGroups.availableGroups().isEmpty()) return tools
+    val base = me.rerere.rikkahub.data.ai.tools.LazyToolGroups.effective(key, tools)
+    if (base.any { it.name == "load_tools" }) return base
+    return base + lazyLoadToolCache.getOrPut(key) {
+        me.rerere.rikkahub.data.ai.tools.buildLoadToolsTool(key)
+    }
+}
+
+/** 执行单个工具调用，供并行和串行路径复用。 */
 private suspend fun executeToolCall(
     tool: UIMessagePart.Tool,
     toolsInternal: List<Tool>,

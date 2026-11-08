@@ -190,8 +190,8 @@ android {
         minSdk = 26
         targetSdk = 37
         // 跟随上游 3.1.1；versionCode 在本地线（238）上递增，保证覆盖安装
-        versionCode = 241
-        versionName = "3.1.1"
+        versionCode = 247
+        versionName = "3.1.2"
 
         // 这里原先按签名口令算 HMAC 并与 native 的 HD_GUARD_EXPECTED_FACTOR 比对，
         // 不一致就中断构建。自改分支里它是纯粹的摩擦：口令来自 local.properties，

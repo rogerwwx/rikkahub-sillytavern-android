@@ -51,6 +51,7 @@ import me.rerere.hugeicons.stroke.AiMagic
 import me.rerere.hugeicons.stroke.Alert01
 import me.rerere.hugeicons.stroke.Book01
 import me.rerere.hugeicons.stroke.Book03
+import me.rerere.hugeicons.stroke.AiBrowser
 import me.rerere.hugeicons.stroke.BookOpen02
 import me.rerere.hugeicons.stroke.BookmarkAdd01
 import me.rerere.hugeicons.stroke.Bookshelf01
