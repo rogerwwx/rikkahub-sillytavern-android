@@ -28,6 +28,7 @@ class SemanticJevAssist(
 
     suspend fun filterRecall(
         assistantId: String,
+        conversationId: String,
         query: String,
         recentContext: String,
         settings: SemanticMemorySettings,
@@ -46,7 +47,7 @@ class SemanticJevAssist(
         val decisions = linkedMapOf<String, JevDecision>()
         val answers = linkedMapOf<String, JevVerdict>()
         val started = System.nanoTime()
-        val event = try { start(assistantId, "recall") }
+        val event = try { start(assistantId, conversationId, "recall") }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法记录辅助诊断，使用基础召回"); return result }
         if (state.toString().length > config.maxInputTokens) {
@@ -88,6 +89,7 @@ class SemanticJevAssist(
 
     suspend fun reviewCandidates(
         assistantId: String,
+        conversationId: String,
         newEvidence: String,
         oldContext: String,
         candidates: List<SemanticJevCandidate>,
@@ -103,7 +105,7 @@ class SemanticJevAssist(
         val decisions = linkedMapOf<String, JevDecision>()
         val answers = linkedMapOf<String, JevVerdict>()
         val started = System.nanoTime()
-        val event = try { start(assistantId, "dream_review") }
+        val event = try { start(assistantId, conversationId, "dream_review") }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法记录辅助诊断，使用基础草稿"); return candidates.map { it.id }.toSet() }
         if (state.toString().length > config.maxInputTokens) {
@@ -156,9 +158,10 @@ class SemanticJevAssist(
         }
     }
 
-    private suspend fun start(assistantId: String, purpose: String): SemanticDiagnosticEvent {
+    private suspend fun start(assistantId: String, conversationId: String, purpose: String): SemanticDiagnosticEvent {
         repository.recoverInterruptedDiagnostics()
-        return SemanticDiagnosticEvent(assistantId = assistantId, operation = "jev", purpose = purpose).also {
+        return SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
+            operation = "jev", purpose = purpose).also {
             repository.dao.putEvent(it)
         }
     }

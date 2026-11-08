@@ -5,12 +5,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.data.datastore.findModelById
+import me.rerere.rikkahub.data.memory.semantic.DEFAULT_SEMANTIC_CONSOLIDATION_PROMPT
+import me.rerere.rikkahub.data.memory.semantic.DEFAULT_SEMANTIC_REFLECTION_PROMPT
 import me.rerere.rikkahub.data.memory.semantic.SemanticDreamSettings
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.components.nav.BackButton
@@ -33,6 +36,8 @@ fun SemanticDreamSettingsPage(id: String) {
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (assistant == null) { Text("助手不存在"); return@Column }
+            Text("同一助手的各窗口共用这些设置，记忆内容分别保存。此页的手动执行和取消作用于助手的全部窗口。",
+                style = MaterialTheme.typography.bodySmall)
             if (!assistant.semanticMemory.enabled) Text("语义记忆尚未启用。这些设置会保留，启用后才参与语义做梦；旧记忆设置独立保存。")
             DreamSwitch("自动做梦", config.automatic) { value -> change { it.copy(automatic = value) } }
             Text("攒够完整轮数立即排队，否则空闲后排队；定期检查归纳与生命周期。Android 后台调度可能延后，无法保证严格时刻执行。",
@@ -41,8 +46,8 @@ fun SemanticDreamSettingsPage(id: String) {
             DreamInt("空闲分钟（1—1440）", config.idleMinutes, 1..1440) { value -> change { it.copy(idleMinutes = value) } }
             DreamInt("定期整理间隔小时（1—720）", config.reviewIntervalHours, 1..720) { value -> change { it.copy(reviewIntervalHours = value) } }
             Row {
-                TextButton(enabled = assistant.semanticMemory.enabled, onClick = vm::dreamNow) { Text("手动做梦 / 恢复失败") }
-                TextButton(onClick = { vm.cancel() }) { Text("取消") }
+                TextButton(enabled = assistant.semanticMemory.enabled, onClick = vm::dreamNow) { Text("全部窗口做梦 / 重试") }
+                TextButton(onClick = { vm.cancel() }) { Text("取消全部窗口任务") }
             }
             schedule?.let { Text("调度状态：${dreamStatus(it.status)}；累计失败 ${it.attempts}。${it.error.orEmpty()}") }
             message?.let { Text(it) }
@@ -53,6 +58,15 @@ fun SemanticDreamSettingsPage(id: String) {
             val actualModel = settings.findModelById(config.modelId ?: settings.chatModelId)
             Text("实际选择：${actualModel?.displayName?.ifBlank { actualModel.modelId } ?: "模型已失效，请重新选择"}。未指定时回退全局默认聊天模型，独立于旧工具模型。",
                 style = MaterialTheme.typography.bodySmall)
+            Text("做梦提示词", style = MaterialTheme.typography.titleMedium)
+            Text("提取用于从对话中记录记忆，归纳用于合并已有条目。自动和手动做梦共用这些设置；编辑后保存生效，留空使用默认。系统会保留必要的来源与输出格式要求。",
+                style = MaterialTheme.typography.bodySmall)
+            DreamPromptEditor(id, "记忆提取提示词", config.reflectionPrompt, DEFAULT_SEMANTIC_REFLECTION_PROMPT) { value ->
+                change { it.copy(reflectionPrompt = value) }
+            }
+            DreamPromptEditor(id, "记忆归纳提示词", config.consolidationPrompt, DEFAULT_SEMANTIC_CONSOLIDATION_PROMPT) { value ->
+                change { it.copy(consolidationPrompt = value) }
+            }
             DreamDecimal("温度（0—2）", config.temperature, 0.0..2.0) { value -> change { it.copy(temperature = value) } }
             var reasoningChoices by remember { mutableStateOf(false) }
             Box {
@@ -111,6 +125,19 @@ fun SemanticDreamSettingsPage(id: String) {
                 style = MaterialTheme.typography.bodySmall) }
             if (events.isEmpty()) Text("尚无 Jev 辅助请求。开启后会记录原候选、保留/排除、不确定及额外耗时。")
         }
+    }
+}
+
+@Composable private fun DreamPromptEditor(
+    assistantId: String, label: String, value: String, defaultPrompt: String, save: (String) -> Unit,
+) {
+    val current = value.ifBlank { defaultPrompt }
+    var draft by rememberSaveable(assistantId, label, value) { mutableStateOf(current) }
+    OutlinedTextField(value = draft, onValueChange = { draft = it }, label = { Text(label) },
+        modifier = Modifier.fillMaxWidth(), minLines = 4, maxLines = 10)
+    Row {
+        TextButton(enabled = draft != current, onClick = { save(draft) }) { Text("保存提示词") }
+        TextButton(onClick = { draft = defaultPrompt; save("") }) { Text("恢复默认提示词") }
     }
 }
 

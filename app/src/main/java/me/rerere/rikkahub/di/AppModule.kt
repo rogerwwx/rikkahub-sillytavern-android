@@ -28,8 +28,8 @@ import org.koin.core.module.dsl.viewModel
 val appModule = module {
     single<Json> { JsonInstant }
 
-    viewModel { (id: String) ->
-        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryVM(id, get(), get(), get(), get(), get())
+    viewModel { (id: String, conversationId: String) ->
+        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryVM(id, conversationId, get(), get(), get(), get(), get())
     }
 
     viewModel { (id: String) ->

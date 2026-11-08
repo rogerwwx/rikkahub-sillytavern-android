@@ -14,6 +14,7 @@ data class SemanticMaintenanceItem(
 data class SemanticMaintenanceJob(
     val id: String,
     val assistantId: String,
+    val conversationId: String,
     val fingerprint: String,
     val items: List<SemanticMaintenanceItem>,
     val status: String = "pending",

@@ -71,7 +71,7 @@ fun semanticMaintenanceSmoke() {
 }
 
 private class MaintenanceFixture(count: Int) : SemanticMaintenanceBackend {
-    var job = SemanticMaintenanceJob("job", "assistant", "model", (1..count).map {
+    var job = SemanticMaintenanceJob("job", "assistant", "window", "model", (1..count).map {
         SemanticMaintenanceItem(it.toString(), 1, "hash")
     })
     val vectors = mutableSetOf<String>()

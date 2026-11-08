@@ -7,6 +7,7 @@ data class SemanticJobHeader(
     val updatedAt: Long,
     val payloadLength: Int,
     val inlinePayload: String?,
+    val conversationId: String? = null,
 )
 
 /** SQLite substr 按 Unicode 码点切片，单字段最多 64 KiB，不把大任务塞进 CursorWindow。 */

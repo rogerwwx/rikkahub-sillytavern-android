@@ -43,13 +43,13 @@ class SemanticMemoryRepository(
     private val context: Context,
 ) {
     /** 启动时由唯一做梦管理器安装来源检查，缓存复用也必须经过它。 */
-    var beforeRecall: (suspend (String) -> Unit)? = null
+    var beforeRecall: (suspend (String, String) -> Unit)? = null
     private val diagnosticsRecovery = Mutex()
     @Volatile private var diagnosticsRecovered = false
     val dao get() = database.dao()
-    fun observe(assistantId: String) = dao.observe(assistantId)
-    suspend fun list(assistantId: String) = dao.list(assistantId)
-    suspend fun get(assistantId: String, id: String) = dao.get(assistantId, id)
+    fun observe(assistantId: String, conversationId: String) = dao.observe(assistantId, conversationId)
+    suspend fun list(assistantId: String, conversationId: String) = dao.list(assistantId, conversationId)
+    suspend fun get(assistantId: String, conversationId: String, id: String) = dao.get(assistantId, conversationId, id)
 
     /** 单例首次使用时将上个进程的未终结请求区分为未知结果，不伪报仍在运行。 */
     suspend fun recoverInterruptedDiagnostics() {
@@ -67,13 +67,14 @@ class SemanticMemoryRepository(
 
     suspend fun save(entity: SemanticMemoryEntity, expectedVersion: Int? = null): SemanticMemoryEntity =
         database.withTransaction {
+            require(entity.assistantId.isNotBlank() && entity.conversationId.isNotBlank()) { "记忆必须属于一个对话窗口" }
             require(entity.content.isNotBlank()) { "记忆正文不能为空" }
             require(entity.type in SEMANTIC_MEMORY_TYPES && entity.status in SEMANTIC_MEMORY_STATUSES) { "记忆类型或状态无效" }
             require(entity.importance.isFinite() && entity.importance in 0.0..1.0 &&
                 entity.confidence.isFinite() && entity.confidence in 0.0..1.0) { "重要度和置信度必须在 0—1 之间" }
             require(Json.parseToJsonElement(entity.metadataJson) is JsonObject) { "元数据必须为对象" }
             require(Json.parseToJsonElement(entity.sourceJson) is JsonArray) { "来源必须为数组" }
-            val old = dao.get(entity.assistantId, entity.id)
+            val old = dao.get(entity.assistantId, entity.conversationId, entity.id)
             // null 表示只允许新建；编辑必须携带读取的版本，删除后不能复活。
             check(if (expectedVersion == null) old == null else old?.contentVersion == expectedVersion) { "记忆版本冲突或条目已删除，请重新读取" }
             val changed = old != null && old.content != entity.content
@@ -98,8 +99,8 @@ class SemanticMemoryRepository(
             saved
         }
 
-    suspend fun delete(assistantId: String, ids: List<String>): Int = database.withTransaction {
-        ids.distinct().chunked(500).sumOf { dao.delete(assistantId, it) }
+    suspend fun delete(assistantId: String, conversationId: String, ids: List<String>): Int = database.withTransaction {
+        ids.distinct().chunked(500).sumOf { dao.delete(assistantId, conversationId, it) }
     }
 
     private suspend fun resolve(config: SemanticMemorySettings): Pair<ProviderSetting, Model> {
@@ -149,11 +150,13 @@ class SemanticMemoryRepository(
     private suspend fun request(
         assistantId: String, input: List<String>, config: SemanticMemorySettings, purpose: String,
         expectedDimensions: Int? = null,
+        conversationId: String? = null,
     ): Pair<String, List<List<Float>>> {
         val (provider, model) = resolve(config)
         val fingerprint = fingerprintOf(provider, model, config)
         recoverInterruptedDiagnostics()
-        val event = SemanticDiagnosticEvent(assistantId = assistantId, operation = "embedding", purpose = purpose)
+        val event = SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
+            operation = "embedding", purpose = purpose)
         dao.putEvent(event)
         val start = System.nanoTime()
         try {
@@ -181,7 +184,7 @@ class SemanticMemoryRepository(
         request(assistantId, listOf("语义记忆连接测试"), settings.normalized(), "connection").second.single().size
 
     suspend fun embed(
-        assistantId: String, ids: List<String>, settings: SemanticMemorySettings, purpose: String = "save",
+        assistantId: String, conversationId: String, ids: List<String>, settings: SemanticMemorySettings, purpose: String = "save",
         expectedVersions: Map<String, Int>? = null, targetFingerprint: String? = null,
         expectedDimensions: Int? = null,
         force: Boolean = false,
@@ -193,11 +196,11 @@ class SemanticMemoryRepository(
         require(expectedDimensions == null || config.dimensions == null || expectedDimensions == config.dimensions) {
             "维护目标维度与配置不一致"
         }
-        var pinnedDimension = expectedDimensions ?: config.dimensions ?: list(assistantId)
+        var pinnedDimension = expectedDimensions ?: config.dimensions ?: list(assistantId, conversationId)
             .firstOrNull { validVector(it, base) }?.embeddingDimension
         for (batch in ids.distinct().chunked(50)) {
             val entries = batch.mapNotNull { id ->
-                val memory = get(assistantId, id)
+                val memory = get(assistantId, conversationId, id)
                 when {
                     memory == null -> { results[id] = "条目已删除"; null }
                     expectedVersions != null && expectedVersions[id] != memory.contentVersion ->
@@ -208,7 +211,7 @@ class SemanticMemoryRepository(
             }
             if (entries.isEmpty()) continue
             try {
-                val (actual, vectors) = request(assistantId, entries.map { it.content }, config, purpose, pinnedDimension)
+                val (actual, vectors) = request(assistantId, entries.map { it.content }, config, purpose, pinnedDimension, conversationId)
                 pinnedDimension = vectors.first().size
                 // 请求期间 Provider/端点/模型参数变化，也不得写入旧配置结果。
                 check(fingerprint(config) == base) { "Embedding 配置在请求期间变化" }
@@ -218,12 +221,13 @@ class SemanticMemoryRepository(
                 }
                 database.withTransaction {
                     entries.forEachIndexed { index, memory ->
-                        val count = dao.storeVector(assistantId, memory.id, memory.contentVersion, memory.contentHash,
+                        val count = dao.storeVector(assistantId, conversationId, memory.id, memory.contentVersion, memory.contentHash,
                             SemanticVectors.encode(vectors[index]), actual, vectors[index].size,
                             maxOf(System.currentTimeMillis(), (memory.indexedAt ?: 0L) + 1L))
                         results[memory.id] = if (count == 1) null else "条目已编辑或删除，向量未写入"
                     }
-                    dao.putEvent(SemanticDiagnosticEvent(assistantId = assistantId, operation = "storage", purpose = purpose,
+                    dao.putEvent(SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
+                        operation = "storage", purpose = purpose,
                         status = if (entries.all { results[it.id] == null }) "success" else "conflict",
                         detailJson = buildJsonObject {
                             put("saved", entries.count { results[it.id] == null }); put("conflicts", entries.count { results[it.id] != null })
@@ -233,24 +237,26 @@ class SemanticMemoryRepository(
                 throw error
             } catch (error: Exception) {
                 entries.forEach { results[it.id] = "向量生成或保存失败（${error.javaClass.simpleName}）" }
-                dao.putEvent(SemanticDiagnosticEvent(assistantId = assistantId, operation = "storage", purpose = purpose,
+                dao.putEvent(SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
+                    operation = "storage", purpose = purpose,
                     status = "failure", error = "向量未保存（${error.javaClass.simpleName}）"))
             }
         }
         results
     }
 
-    suspend fun recall(assistantId: String, query: String, settings: SemanticMemorySettings): SemanticRecallResult =
+    suspend fun recall(assistantId: String, conversationId: String, query: String, settings: SemanticMemorySettings): SemanticRecallResult =
         withContext(Dispatchers.IO) {
             val start = System.nanoTime()
-            beforeRecall?.invoke(assistantId)
+            beforeRecall?.invoke(assistantId, conversationId)
             recoverInterruptedDiagnostics()
-            val event = SemanticDiagnosticEvent(assistantId = assistantId, operation = "recall", purpose = "query")
+            val event = SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
+                operation = "recall", purpose = "query")
             dao.putEvent(event)
             try {
                 val config = settings.normalized()
                 val now = System.currentTimeMillis()
-                val all = list(assistantId)
+                val all = list(assistantId, conversationId)
                 val active = all.filter { it.status == "active" && (it.isCore || it.expiresAt == null || it.expiresAt > now) }
                 val filters = linkedMapOf("inactive_or_expired" to all.size - active.size)
                 filters["inactive_status"] = all.count { it.status != "active" }
@@ -262,16 +268,17 @@ class SemanticMemoryRepository(
                     if (query.isBlank()) emptyList() else {
                         dao.lexical(SimpleSQLiteQuery("""SELECT m.id AS id, bm25(semantic_fts) AS score
                             FROM semantic_fts JOIN semantic_memory m ON m.id = semantic_fts.id
-                            WHERE semantic_fts MATCH jieba_query(?) AND m.assistantId = ? AND m.status = 'active'
+                            WHERE semantic_fts MATCH jieba_query(?) AND m.assistantId = ? AND m.conversationId = ? AND m.status = 'active'
                             AND (m.isCore = 1 OR m.expiresAt IS NULL OR m.expiresAt > ?)
-                            ORDER BY score ASC, m.id LIMIT ?""", arrayOf<Any?>(query.trim().take(4096), assistantId, now, limit)))
+                            ORDER BY score ASC, m.id LIMIT ?""", arrayOf<Any?>(query.trim().take(4096), assistantId, conversationId, now, limit)))
                             .map { it.id to it.score }
                     }
                 } catch (error: CancellationException) { throw error
                 } catch (error: Exception) { degraded += "BM25 检索失败（${error.javaClass.simpleName}）"; emptyList() }
                 val vector = try {
                     val base = fingerprint(config)
-                    val (queryFingerprint, queryVectors) = request(assistantId, listOf(query), config, "query")
+                    val (queryFingerprint, queryVectors) = request(assistantId, listOf(query), config, "query",
+                        conversationId = conversationId)
                     val queryVector = queryVectors.single()
                     check(queryFingerprint == "$base:${queryVector.size}" && fingerprint(config) == base) {
                         "Embedding 查询配置在请求期间变化"
@@ -311,7 +318,7 @@ class SemanticMemoryRepository(
                 val ranked = fuseSemanticRanks(lexical, vector, config.minSimilarity, limit * 2, config.rrfK)
                 // 核心只在已相关的候选内获得有限优先名额，不能绕过检索门槛。
                 // 网络等待期间编辑/删除/归档的候选退出本次结果；过滤发生在 TopK 之前。
-                val currentById = dao.revisions(assistantId).associateBy { it.id }
+                val currentById = dao.revisions(assistantId, conversationId).associateBy { it.id }
                 val byId = active.mapNotNull { snapshot ->
                     currentById[snapshot.id]?.takeIf {
                         it.contentVersion == snapshot.contentVersion && it.contentHash == snapshot.contentHash &&
@@ -341,7 +348,7 @@ class SemanticMemoryRepository(
                     put("degraded", degraded.joinToString("；"))
                     filters.forEach { (key, count) -> put(key, count) }
                 }.toString(), error = degraded.takeIf { it.isNotEmpty() }?.joinToString("；")))
-                if (hits.isNotEmpty()) dao.recordAccess(assistantId, hits.map { it.memory.id }, now)
+                if (hits.isNotEmpty()) dao.recordAccess(assistantId, conversationId, hits.map { it.memory.id }, now)
                 result
             } catch (error: CancellationException) {
                 withContext(NonCancellable) { dao.putEvent(event.copy(status = "cancelled", durationNanos = System.nanoTime() - start)) }
@@ -361,13 +368,13 @@ class SemanticMemoryRepository(
     }
 
     /** 同轮只复用配置与候选内容都相同的召回；状态/到期/删除同样会使缓存失效。 */
-    suspend fun recallRevision(assistantId: String, config: SemanticMemorySettings): String {
-        beforeRecall?.invoke(assistantId)
+    suspend fun recallRevision(assistantId: String, conversationId: String, config: SemanticMemorySettings): String {
+        beforeRecall?.invoke(assistantId, conversationId)
         val now = System.currentTimeMillis()
         val model = try { fingerprint(config)
         } catch (error: CancellationException) { throw error
         } catch (error: Exception) { "invalid" }
-        return semanticContentHash(config.toString() + model + dao.revisions(assistantId).joinToString {
+        return semanticContentHash("$assistantId:$conversationId:" + config.toString() + model + dao.revisions(assistantId, conversationId).joinToString {
             "${it.id}:${it.contentVersion}:${it.updatedAt}:${it.status}:${it.isCore}:${it.expiresAt}:${it.expiresAt?.let { time -> time > now }}:${it.embeddingFingerprint}:${it.indexedAt}"
         })
     }

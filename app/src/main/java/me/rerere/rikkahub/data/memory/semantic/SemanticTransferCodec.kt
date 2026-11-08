@@ -9,6 +9,7 @@ import java.nio.charset.CodingErrorAction
 data class SemanticTransferRecord(
     val id: String,
     val assistantId: String,
+    val conversationId: String,
     val content: String,
     val type: String,
     val importance: Double,
@@ -32,7 +33,8 @@ object SemanticTransferCodec {
     private val relationKeys = setOf("parentId", "parentIds", "childId", "childIds", "mergedFrom", "mergedInto",
         "supersedes", "supersededBy", "replacedBy", "replaces", "relatedIds", "memoryId", "memoryIds",
         "parent_id", "parent_ids", "child_id", "child_ids", "merged_from", "merged_into", "superseded_by",
-        "replaced_by", "related_ids", "memory_id", "memory_ids", "parents", "children")
+        "replaced_by", "related_ids", "memory_id", "memory_ids", "parents", "children",
+        "consolidatedFrom", "consolidatedInto")
 
     fun decodeUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
@@ -41,7 +43,7 @@ object SemanticTransferCodec {
     fun encode(records: List<SemanticTransferRecord>): String {
         validate(records)
         return json.encodeToString(JsonObject.serializer(), buildJsonObject {
-            put("schemaVersion", 1); put("format", "huadeng-semantic-memory")
+            put("schemaVersion", 2); put("format", "huadeng-semantic-memory")
             put("vectorCache", false)
             put("memories", JsonArray(records.map(::recordJson)))
         })
@@ -50,7 +52,7 @@ object SemanticTransferCodec {
     fun decode(text: String): List<SemanticTransferRecord> {
         require(text.toByteArray(Charsets.UTF_8).size <= 64 * 1024 * 1024) { "导入文件超过 64 MiB" }
         val root = json.parseToJsonElement(text).jsonObject
-        require(root.getValue("schemaVersion").jsonPrimitive.int == 1 &&
+        require(root.getValue("schemaVersion").jsonPrimitive.int == 2 &&
             root.getValue("format").jsonPrimitive.content == "huadeng-semantic-memory") { "不支持的语义记忆格式或版本" }
         val records = root.getValue("memories").jsonArray.map { element ->
             val value = element.jsonObject
@@ -58,7 +60,7 @@ object SemanticTransferCodec {
             fun nullableLong(key: String) = value[key]?.takeUnless { it is JsonNull }?.jsonPrimitive?.long
             val content = text("content")
             require(text("contentHash") == semanticContentHash(content)) { "记忆正文哈希不匹配" }
-            SemanticTransferRecord(text("id"), text("assistantId"), content, text("type"),
+            SemanticTransferRecord(text("id"), text("assistantId"), text("conversationId"), content, text("type"),
                 value.getValue("importance").jsonPrimitive.double, value.getValue("confidence").jsonPrimitive.double,
                 value.getValue("isCore").jsonPrimitive.boolean, text("status"),
                 value.getValue("createdAt").jsonPrimitive.long, value.getValue("updatedAt").jsonPrimitive.long,
@@ -70,13 +72,17 @@ object SemanticTransferCodec {
         return records
     }
 
-    /** 跨助手导入使用确定性 ID；关系只映射记忆 ID，不改聊天/消息来源 ID。 */
-    fun remap(records: List<SemanticTransferRecord>, targetAssistant: String): List<SemanticTransferRecord> {
-        val ids = records.associate { record -> record.id to if (record.assistantId == targetAssistant) record.id else
-            UUID.nameUUIDFromBytes("semantic-import:$targetAssistant:${record.assistantId}:${record.id}"
+    /** 跨窗口导入使用确定性 ID；原始聊天来源保留，导入内容由用户明确支持。 */
+    fun remap(records: List<SemanticTransferRecord>, targetAssistant: String, targetConversation: String): List<SemanticTransferRecord> {
+        fun sameWindow(record: SemanticTransferRecord) =
+            record.assistantId == targetAssistant && record.conversationId == targetConversation
+        val ids = records.associate { record -> record.id to if (sameWindow(record)) record.id else
+            UUID.nameUUIDFromBytes("semantic-import:$targetAssistant:$targetConversation:${record.assistantId}:${record.conversationId}:${record.id}"
                 .toByteArray(Charsets.UTF_8)).toString() }
         return records.map { record -> record.copy(id = ids.getValue(record.id), assistantId = targetAssistant,
-            metadata = mapRelationships(record.metadata, ids).jsonObject) }
+            conversationId = targetConversation,
+            metadata = JsonObject(mapRelationships(record.metadata, ids).jsonObject +
+                if (sameWindow(record)) emptyMap() else mapOf("manualSupported" to JsonPrimitive(true)))) }
     }
 
     fun evidenceKey(record: SemanticTransferRecord): String? = record.sources.takeIf { it.isNotEmpty() }?.let {
@@ -110,7 +116,8 @@ object SemanticTransferCodec {
     private fun validate(records: List<SemanticTransferRecord>) {
         require(records.size <= 100_000 && records.map { it.id }.distinct().size == records.size) { "条目过多或存在重复 ID" }
         records.forEach { record ->
-            require(record.id.isNotBlank() && record.id.length <= 256 && record.assistantId.isNotBlank()) { "条目 ID 无效" }
+            require(record.id.isNotBlank() && record.id.length <= 256 && record.assistantId.isNotBlank() &&
+                record.conversationId.isNotBlank()) { "条目 ID 或对话窗口无效" }
             require(record.content.isNotBlank() && record.content.length <= 1_000_000) { "记忆正文为空或过长" }
             require(record.type in types && record.status in statuses) { "记忆类型或生命周期状态无效" }
             require(record.importance.isFinite() && record.importance in 0.0..1.0 &&
@@ -122,7 +129,8 @@ object SemanticTransferCodec {
     }
 
     private fun recordJson(record: SemanticTransferRecord) = buildJsonObject {
-        put("id", record.id); put("assistantId", record.assistantId); put("content", record.content)
+        put("id", record.id); put("assistantId", record.assistantId); put("conversationId", record.conversationId)
+        put("content", record.content)
         put("contentHash", semanticContentHash(record.content)); put("type", record.type)
         put("importance", record.importance); put("confidence", record.confidence); put("isCore", record.isCore)
         put("status", record.status); put("createdAt", record.createdAt); put("updatedAt", record.updatedAt)

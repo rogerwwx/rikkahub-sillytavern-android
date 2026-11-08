@@ -109,7 +109,7 @@ fun AssistantMemoryPage(id: String) {
                     BackButton()
                 },
                 actions = {
-                    TextButton(onClick = { navController.navigate(Screen.SemanticMemory(id)) }) {
+                    TextButton(onClick = { navController.navigate(Screen.SemanticMemoryConversations(id)) }) {
                         Text("语义记忆")
                     }
                     if (MemoryTab.entries[pagerState.currentPage] == MemoryTab.FILES) {

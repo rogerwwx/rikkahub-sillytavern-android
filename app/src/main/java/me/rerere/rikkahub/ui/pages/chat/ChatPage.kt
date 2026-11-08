@@ -1831,6 +1831,7 @@ private fun TopBar(
     val titleState = useEditState<String> {
         onUpdateTitle(it)
     }
+    val nav = LocalNavController.current
 
     // 前端卡（WebView）模式：消息区在 WebView 里，原生 ChatList 的顶部渐隐不生效，
     // 顶部会完全透明、标题压在背景图上不可读。这里补一层按主题背景色的渐变遮罩——
@@ -1899,6 +1900,11 @@ private fun TopBar(
             }
         },
         actions = {
+            if (assistant.semanticMemory.enabled) {
+                TextButton(onClick = {
+                    nav.navigate(Screen.SemanticMemory(assistant.id.toString(), conversation.id.toString()))
+                }) { Text("记忆") }
+            }
             // 语音 / 视频通话：仅在 TTS 与 ASR 均已配置时显示
             val ttsReady = settings.getSelectedTTSProvider() != null
             val asrReady = settings.getSelectedASRProvider() != null

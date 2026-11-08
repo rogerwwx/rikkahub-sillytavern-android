@@ -41,7 +41,7 @@ class SemanticDreamScheduler(
                 settings.assistants.forEach { assistant ->
                     val id = assistant.id.toString()
                     val changed = previous[id] != null && previous[id] != hashes[id]
-                    if (changed) cancel(id, cancelPeriodic = true)
+                    if (changed) invalidateConfiguration(id)
                     if (assistant.semanticMemory.enabled && assistant.semanticMemory.dream.automatic) {
                         SemanticDreamWorker.periodic(context, id, hashes.getValue(id), assistant.semanticMemory.dream.reviewIntervalHours)
                         if (changed) enqueue(id, hashes.getValue(id), "configuration:${hashes[id]}", 0, manual = true)
@@ -59,55 +59,76 @@ class SemanticDreamScheduler(
         val config = assistant.semanticMemory.dream.normalized()
         val key = conversation.id.toString() + ":" + conversation.messageNodes.lastOrNull()?.currentMessage?.id
         enqueue(pending.assistantId, hash, key,
-            if (pending.turns >= config.minCompletedTurns) 0 else config.idleMinutes * 60_000L)
+            if (pending.turns >= config.minCompletedTurns) 0 else config.idleMinutes * 60_000L,
+            conversationId = pending.conversationId)
     }
 
     fun onAppHidden() = scope.launch { acceleratePending() }
     fun onConversationLeft(conversationId: Uuid) = scope.launch {
         settingsStore.awaitLoaded().assistants.forEach { assistant ->
-            load(assistant.id.toString())?.takeIf { it.turnKey.startsWith("$conversationId:") }?.let { accelerate(it) }
+            states(assistant.id.toString()).filter { it.conversationId == conversationId.toString() }.forEach { accelerate(it) }
         }
     }
 
     suspend fun resumePending() {
         manager.pendingAssistants().forEach { id ->
             val (_, hash) = current(id) ?: return@forEach
-            val state = load(id)
-            if (state == null) enqueue(id, hash, "startup", 0)
-            else if (state.status in setOf("pending", "running")) {
+            val states = states(id)
+            if (states.isEmpty()) enqueue(id, hash, "startup", 0)
+            else states.filter { it.status in setOf("pending", "running") }.forEach { state ->
                 val recovered = state.copy(status = "pending")
                 put(recovered)
-                SemanticDreamWorker.schedule(context, id, hash, recovered.dueAt - System.currentTimeMillis())
+                SemanticDreamWorker.schedule(context, id, hash, recovered.dueAt - System.currentTimeMillis(),
+                    conversationId = recovered.conversationId)
             }
         }
     }
 
     /** 应用级作用域让用户离开设置页后继续运行；失败草稿和窗口由 Manager 恢复。 */
-    fun manual(assistantId: String) = scope.launch {
-        SemanticDreamWorker.cancelOneTime(context, assistantId)
+    fun manual(assistantId: String, conversationId: String? = null) = scope.launch {
+        SemanticDreamWorker.cancelOneTime(context, assistantId, conversationId)
         val (_, hash) = current(assistantId, requireAutomatic = false) ?: return@launch
         val key = "manual:${System.currentTimeMillis()}"
-        enqueue(assistantId, hash, key, 0, manual = true, dispatch = false)
-        SemanticDreamWorker.schedule(context, assistantId, hash, 0, manual = true)
+        enqueue(assistantId, hash, key, 0, manual = true, dispatch = false, conversationId = conversationId)
+        SemanticDreamWorker.schedule(context, assistantId, hash, 0, manual = true, conversationId = conversationId)
     }
 
-    suspend fun cancel(assistantId: String, cancelPeriodic: Boolean = false) {
+    suspend fun cancel(assistantId: String, cancelPeriodic: Boolean = false, conversationId: String? = null) {
         if (cancelPeriodic) SemanticDreamWorker.cancel(context, assistantId)
-        else SemanticDreamWorker.cancelOneTime(context, assistantId)
-        manager.cancel(assistantId)
-        load(assistantId)?.let { put(it.copy(status = "cancelled", error = "已取消；来源窗口保留")) }
+        else if (conversationId != null) SemanticDreamWorker.cancelOneTime(context, assistantId, conversationId)
+        else states(assistantId).forEach { SemanticDreamWorker.cancelOneTime(context, assistantId, it.conversationId) }
+        manager.cancel(assistantId, conversationId)
+        states(assistantId).filter { conversationId == null || it.conversationId == conversationId }
+            .forEach { put(it.copy(status = "cancelled", error = "已取消；来源窗口保留")) }
     }
 
-    suspend fun load(assistantId: String): SemanticDreamScheduleState? = repository.dao.getJob(id(assistantId))?.let {
+    suspend fun load(assistantId: String, conversationId: String? = null): SemanticDreamScheduleState? =
+        repository.dao.getJob(id(assistantId, conversationId))?.let {
         Json.decodeFromString<SemanticDreamScheduleState>(it.payloadJson)
     }
 
+    private suspend fun states(assistantId: String): List<SemanticDreamScheduleState> = repository.dao.jobs(assistantId)
+        .filter { it.kind == KIND }.map { Json.decodeFromString<SemanticDreamScheduleState>(it.payloadJson) }
+
+    /** 设置观察可能稍晚到达，只撤销旧配置的任务，保留保存设置后新建的队列。 */
+    private suspend fun invalidateConfiguration(assistantId: String) = repository.database.withTransaction {
+        val settings = settingsStore.awaitLoaded()
+        val hash = settings.assistants.find { it.id.toString() == assistantId }?.let { configurationHash(settings, it) }
+        states(assistantId).filter {
+            it.configurationHash != hash && it.status in setOf("pending", "running")
+        }.forEach {
+            SemanticDreamWorker.cancelOneTime(context, assistantId, it.conversationId)
+            put(it.copy(status = "cancelled", error = "排队时的模式、模型或自动开关已改变"))
+        }
+    }
+
     /** 旧队列不能用已失效的模式、模型或自动开关运行。 */
-    suspend fun runScheduled(assistantId: String, hash: String, periodic: Boolean, manual: Boolean = false): String {
+    suspend fun runScheduled(assistantId: String, hash: String, periodic: Boolean, manual: Boolean = false,
+        conversationId: String? = null): String {
         val effective = current(assistantId, requireAutomatic = !manual)
         if (effective == null || hash != effective.second) {
             repository.database.withTransaction {
-                load(assistantId)?.takeIf { it.configurationHash == hash && it.status in setOf("pending", "running") }?.let {
+                load(assistantId, conversationId)?.takeIf { it.configurationHash == hash && it.status in setOf("pending", "running") }?.let {
                     put(it.copy(status = "cancelled", error = "排队时的模式、模型或自动开关已改变"))
                 }
             }
@@ -118,17 +139,17 @@ class SemanticDreamScheduler(
         if (periodic) {
             val interval = config.reviewIntervalHours * 3_600_000L
             val key = "periodic:${System.currentTimeMillis() / interval}"
-            enqueue(assistantId, hash, key, 0, dispatch = false)
+            enqueue(assistantId, hash, key, 0, dispatch = false, conversationId = conversationId)
         }
-        val state = load(assistantId) ?: return "completed"
+        val state = load(assistantId, conversationId) ?: return "completed"
         if (state.configurationHash != hash || state.status !in setOf("pending", "running")) return state.status
         if (state.dueAt > System.currentTimeMillis()) return "pending"
         put(state.copy(status = "running"))
         val hold = keepAlive.acquire()
         try {
-            val result = manager.runAssistant(assistantId, automatic = !manual)
+            val result = manager.runAssistant(assistantId, automatic = !manual, conversationId = conversationId)
             return repository.database.withTransaction {
-                val latest = load(assistantId) ?: return@withTransaction "cancelled"
+                val latest = load(assistantId, conversationId) ?: return@withTransaction "cancelled"
                 if (latest.configurationHash != hash || latest.status == "cancelled") return@withTransaction "cancelled"
                 if (latest.turnKey != state.turnKey) {
                     put(latest.copy(status = "pending"))
@@ -140,12 +161,12 @@ class SemanticDreamScheduler(
             }
         } catch (cancel: CancellationException) {
             withContext(NonCancellable) {
-                val latest = load(assistantId)
+                val latest = load(assistantId, conversationId)
                 if (latest?.status == "running" && latest.configurationHash == hash) put(latest.copy(status = "pending"))
             }
             throw cancel
         } catch (_: Exception) {
-            val latest = load(assistantId) ?: return "failed"
+            val latest = load(assistantId, conversationId) ?: return "failed"
             if (latest.configurationHash != hash || latest.status == "cancelled") return "cancelled"
             val next = latest.afterRun("failed", System.currentTimeMillis(), config, "做梦运行失败；来源窗口保留")
             put(next)
@@ -154,22 +175,23 @@ class SemanticDreamScheduler(
     }
 
     private suspend fun enqueue(assistantId: String, hash: String, turnKey: String, delayMillis: Long,
-        manual: Boolean = false, dispatch: Boolean = true) {
-        val next = repository.database.withTransaction {
-            val old = load(assistantId)
+        manual: Boolean = false, dispatch: Boolean = true, conversationId: String? = null) {
+        repository.database.withTransaction {
+            if (current(assistantId, requireAutomatic = false)?.second != hash) return@withTransaction
+            val old = load(assistantId, conversationId)
             val proposed = old?.rescheduled(hash, turnKey, System.currentTimeMillis(), delayMillis, manual)
-                ?: SemanticDreamScheduleState(assistantId, hash, turnKey, System.currentTimeMillis() + delayMillis)
+                ?: SemanticDreamScheduleState(assistantId, hash, turnKey, System.currentTimeMillis() + delayMillis,
+                    conversationId = conversationId)
             val next = if (old?.status == "running" && old.configurationHash == hash && !manual)
                 proposed.copy(status = "running") else proposed
             put(next)
-            next
+            if (dispatch && next.status == "pending") SemanticDreamWorker.schedule(context, assistantId, hash,
+                next.dueAt - System.currentTimeMillis(), conversationId = conversationId)
         }
-        if (dispatch && next.status == "pending") SemanticDreamWorker.schedule(context, assistantId, hash,
-            next.dueAt - System.currentTimeMillis())
     }
 
     private suspend fun acceleratePending() {
-        settingsStore.awaitLoaded().assistants.forEach { assistant -> load(assistant.id.toString())?.let { accelerate(it) } }
+        settingsStore.awaitLoaded().assistants.forEach { assistant -> states(assistant.id.toString()).forEach { accelerate(it) } }
     }
 
     private suspend fun accelerate(state: SemanticDreamScheduleState) {
@@ -177,12 +199,12 @@ class SemanticDreamScheduler(
         val (_, hash) = current(state.assistantId) ?: return
         if (state.configurationHash != hash) return
         val accelerated = repository.database.withTransaction {
-            val latest = load(state.assistantId) ?: return@withTransaction false
+            val latest = load(state.assistantId, state.conversationId) ?: return@withTransaction false
             if (latest != state) return@withTransaction false
             put(state.copy(dueAt = System.currentTimeMillis()))
             true
         }
-        if (accelerated) SemanticDreamWorker.schedule(context, state.assistantId, hash, 0)
+        if (accelerated) SemanticDreamWorker.schedule(context, state.assistantId, hash, 0, conversationId = state.conversationId)
     }
 
     private suspend fun current(assistantId: String, requireAutomatic: Boolean = true): Pair<Assistant, String>? {
@@ -193,11 +215,12 @@ class SemanticDreamScheduler(
     }
 
     private suspend fun put(state: SemanticDreamScheduleState) = repository.dao.putJob(
-        SemanticJobEntity(id(state.assistantId), state.assistantId, KIND, Json.encodeToString(state)))
+        SemanticJobEntity(id(state.assistantId, state.conversationId), state.assistantId, KIND, Json.encodeToString(state),
+            conversationId = state.conversationId))
 
     companion object {
         const val KIND = "dream_schedule"
-        private fun id(assistantId: String) = "dream-schedule:$assistantId"
+        private fun id(assistantId: String, conversationId: String?) = "dream-schedule:$assistantId:${conversationId ?: "all"}"
         fun configurationHash(settings: Settings, assistant: Assistant): String {
             val memory = assistant.semanticMemory.normalized()
             val model = settings.findModelById(memory.dream.modelId ?: settings.chatModelId)

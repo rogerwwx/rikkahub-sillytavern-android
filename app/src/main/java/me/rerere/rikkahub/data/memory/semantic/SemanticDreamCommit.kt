@@ -30,7 +30,10 @@ fun planDreamChanges(
     assistantId: String, runId: String, draft: SemanticDreamDraft, window: DreamWindow,
     memories: List<SemanticMemoryEntity>, settings: SemanticDreamSettings, now: Long,
 ): List<DreamMutation> {
-    val originals = memories.associateBy { it.id }
+    val conversationId = window.evidence.map { it.conversationId }.distinct().single()
+    val originals = memories.filter {
+        it.assistantId == assistantId && it.conversationId == conversationId
+    }.associateBy { it.id }
     val planned = originals.toMutableMap()
     val targets = mutableSetOf<String>()
     val evidenceMap = window.evidence.associateBy { it.evidenceId }
@@ -85,7 +88,8 @@ fun planDreamChanges(
             }
             val isCore = target?.isCore == true
             val expiry = dreamExpiry(change.type, isCore, evidenceAt, ttl)
-            planned[id] = SemanticMemoryEntity(id = id, assistantId = assistantId, content = checkNotNull(content),
+            planned[id] = SemanticMemoryEntity(id = id, assistantId = assistantId, conversationId = conversationId,
+                content = checkNotNull(content),
                 type = change.type, importance = change.importance, isCore = isCore,
                 expiresAt = expiry, status = if (expiry != null && expiry <= now) "expired" else "active", createdAt = now, updatedAt = now,
                 sourceJson = addSources("[]", newEvidence), metadataJson = metadata("{}",
@@ -96,6 +100,16 @@ fun planDreamChanges(
     return planned.values.filter { it != originals[it.id] }.map { DreamMutation(originals[it.id], it) }
 }
 
+private fun hasValidDreamSupport(memory: SemanticMemoryEntity, sources: List<JsonElement>): Boolean {
+    val valid = sources.map { element ->
+        val source = runCatching { sourceCodec.decodeFromJsonElement<DreamSource>(element) }.getOrNull()
+        source == null || source.valid
+    }
+    // 归纳正文可能包含多个事实，失去部分来源时整条暂停，留给用户核对。
+    return if (dreamMetadata(memory)["origin"]?.jsonPrimitive?.contentOrNull == "consolidation")
+        valid.all { it } else valid.any { it }
+}
+
 fun withdrawDreamSources(memory: SemanticMemoryEntity, invalidIds: Set<String>, now: Long): SemanticMemoryEntity {
     val sources = sourceCodec.parseToJsonElement(memory.sourceJson).jsonArray
     val next = sources.map { element ->
@@ -103,10 +117,7 @@ fun withdrawDreamSources(memory: SemanticMemoryEntity, invalidIds: Set<String>, 
         if (source != null && source.evidenceId in invalidIds) JsonObject(element.jsonObject + ("valid" to JsonPrimitive(false))) else element
     }
     if (next == sources) return memory
-    val supported = next.any { element ->
-        val source = runCatching { sourceCodec.decodeFromJsonElement<DreamSource>(element) }.getOrNull()
-        source == null || source.valid
-    }
+    val supported = hasValidDreamSupport(memory, next)
     val automatic = dreamMetadata(memory)["origin"]?.jsonPrimitive?.contentOrNull in setOf("dream", "consolidation") &&
         dreamMetadata(memory)["manualRestored"]?.jsonPrimitive?.booleanOrNull != true &&
         dreamMetadata(memory)["manualEdited"]?.jsonPrimitive?.booleanOrNull != true &&
@@ -127,7 +138,8 @@ fun restoreDreamSources(memory: SemanticMemoryEntity, restoredIds: Set<String>, 
         if (source != null && !source.valid && source.evidenceId in restoredIds) JsonObject(element.jsonObject + ("valid" to JsonPrimitive(true))) else element
     }
     if (next == sources) return memory
-    val canResume = memory.status == "dormant" && dreamMetadata(memory)["sourceWithdrawn"]?.jsonPrimitive?.booleanOrNull == true &&
+    val canResume = memory.status == "dormant" && hasValidDreamSupport(memory, next) &&
+        dreamMetadata(memory)["sourceWithdrawn"]?.jsonPrimitive?.booleanOrNull == true &&
         dreamMetadata(memory)["origin"]?.jsonPrimitive?.contentOrNull in setOf("dream", "consolidation") &&
         listOf("manualLifecycle", "manualEdited", "manualRestored", "manualSupported").none {
             dreamMetadata(memory)[it]?.jsonPrimitive?.booleanOrNull == true

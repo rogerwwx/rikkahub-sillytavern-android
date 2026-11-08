@@ -50,11 +50,12 @@ class ChatToolFactory(
         settings: Settings,
         assistant: Assistant,
         model: Model,
+        conversationId: kotlin.uuid.Uuid?,
         workspaceCwd: String? = null,
     ): List<Tool> {
         val workspaceTools = createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd)
         val tools = buildList {
-            addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant))
+            addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant, conversationId?.toString()))
             if (shouldUseExternalWebSearch(assistant, model)) {
                 addAll(createSearchTools(settings))
             }

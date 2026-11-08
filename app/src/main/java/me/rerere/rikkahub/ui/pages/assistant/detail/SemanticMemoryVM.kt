@@ -13,6 +13,7 @@ import java.io.ByteArrayOutputStream
 
 class SemanticMemoryVM(
     val assistantId: String,
+    val conversationId: String,
     private val repository: SemanticMemoryRepository,
     private val settingsStore: SettingsStore,
     private val context: Context,
@@ -23,7 +24,7 @@ class SemanticMemoryVM(
     private val transfers = SemanticTransferManager(repository)
     val settings = settingsStore.settingsFlow.stateIn(viewModelScope, SharingStarted.Eagerly,
         me.rerere.rikkahub.data.datastore.Settings.dummy())
-    val memories = repository.observe(assistantId).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val memories = repository.observe(assistantId, conversationId).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val query = MutableStateFlow("")
     val typeFilter = MutableStateFlow("all")
     val statusFilter = MutableStateFlow("all")
@@ -83,6 +84,7 @@ class SemanticMemoryVM(
     fun toggle(id: String) { selected.value = semanticToggleSelection(selected.value, id) }
 
     fun save(entity: SemanticMemoryEntity, expectedVersion: Int?, onSaved: () -> Unit) = action {
+        require(entity.assistantId == assistantId && entity.conversationId == conversationId) { "记忆不属于当前窗口" }
         val metadata = kotlinx.serialization.json.Json.parseToJsonElement(entity.metadataJson) as kotlinx.serialization.json.JsonObject
         val edited = if (expectedVersion != null) entity.copy(metadataJson = kotlinx.serialization.json.JsonObject(metadata +
             ("manualEdited" to kotlinx.serialization.json.JsonPrimitive(true))).toString()) else entity
@@ -90,14 +92,14 @@ class SemanticMemoryVM(
         onSaved()
         val config = repository.assistantSettings(assistantId) ?: return@action
         if (config.embeddingModelId != null) {
-            val errors = repository.embed(assistantId, listOf(saved.id), config,
+            val errors = repository.embed(assistantId, conversationId, listOf(saved.id), config,
                 expectedVersions = mapOf(saved.id to saved.contentVersion))
             message.value = if (errors[saved.id] == null) "记忆已保存并生成向量" else "记忆已保存；${errors[saved.id]}"
         } else message.value = "记忆已保存，选择 Embedding 模型后可生成向量"
     }
 
     fun delete(ids: Set<String>) = action {
-        val count = repository.delete(assistantId, ids.toList())
+        val count = repository.delete(assistantId, conversationId, ids.toList())
         selected.value = selected.value - ids
         message.value = "已删除 $count 条语义记忆"
     }
@@ -112,53 +114,53 @@ class SemanticMemoryVM(
         val text = recallQuery.value.trim()
         require(text.isNotBlank()) { "请输入召回查询" }
         val config = repository.assistantSettings(assistantId) ?: error("助手不存在")
-        recallResult.value = repository.recall(assistantId, text, config)
+        recallResult.value = repository.recall(assistantId, conversationId, text, config)
         refreshDiagnostics()
     }
 
     fun rebuild(ids: List<String>) = action {
         val config = repository.assistantSettings(assistantId) ?: error("助手不存在")
-        val job = maintenance.create(assistantId, ids, config)
+        val job = maintenance.create(assistantId, conversationId, ids, config)
         SemanticMaintenanceWorker.schedule(context, job.id)
         message.value = "已创建 ${job.items.size} 条的持久重建任务"
         refreshDiagnostics()
     }
 
     fun dream() = action {
-        me.rerere.rikkahub.data.service.SemanticDreamWorker.scheduleManual(context, assistantId)
-        message.value = "已排入后台做梦队列，离开页面后仍可继续；实际执行时间由 Android 调度"
+        me.rerere.rikkahub.data.service.SemanticDreamWorker.scheduleManual(context, assistantId, conversationId)
+        message.value = "本窗口已排入后台做梦队列，离开页面后仍可继续；实际执行时间由 Android 调度"
         refreshDiagnostics()
     }
 
-    fun cancelDream() = viewModelScope.launch { dreamScheduler.cancel(assistantId) }
+    fun cancelDream() = viewModelScope.launch { dreamScheduler.cancel(assistantId, conversationId = conversationId) }
 
-    fun retryDreamEmbedding() = action { dreamManager.retryEmbedding(assistantId); refreshDiagnostics() }
+    fun retryDreamEmbedding() = action { dreamManager.retryEmbedding(assistantId, conversationId); refreshDiagnostics() }
 
     fun organizeSelected() = action {
-        val result = dreamManager.organize(assistantId, selected.value.toList())
+        val result = dreamManager.organize(assistantId, conversationId, selected.value.toList())
         message.value = if (result.status == "failed") result.error else "整理已完成，生成 ${result.changed} 条；原条目保留在归档"
         if (result.status != "failed") selected.value = emptySet()
         refreshDiagnostics()
     }
 
-    fun lifecycle(status: String) = action { dreamManager.setStatus(assistantId, selected.value.toList(), status); refreshDiagnostics() }
+    fun lifecycle(status: String) = action { dreamManager.setStatus(assistantId, conversationId, selected.value.toList(), status); refreshDiagnostics() }
 
-    fun inspectSources(memoryId: String) = action { sourcePreview.value = dreamManager.readSources(assistantId, memoryId) }
+    fun inspectSources(memoryId: String) = action { sourcePreview.value = dreamManager.readSources(assistantId, conversationId, memoryId) }
 
     fun cancelRebuild(id: String) = action {
-        maintenance.cancel(id)
+        maintenance.cancel(assistantId, conversationId, id)
         SemanticMaintenanceWorker.cancel(context, id)
         refreshDiagnostics()
     }
 
     fun resumeRebuild(id: String, failuresOnly: Boolean) = action {
-        maintenance.resume(id, failuresOnly)
+        maintenance.resume(assistantId, conversationId, id, failuresOnly)
         SemanticMaintenanceWorker.schedule(context, id)
         refreshDiagnostics()
     }
 
     fun exportTo(uri: Uri, ids: Set<String>?) = action {
-        val text = transfers.export(assistantId, ids)
+        val text = transfers.export(assistantId, conversationId, ids)
         context.contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
             ?: error("无法写入所选文件")
         message.value = "语义记忆已导出（内容与元数据，不含向量缓存）"
@@ -178,21 +180,21 @@ class SemanticMemoryVM(
                 }
                 SemanticTransferCodec.decodeUtf8(bytes.toByteArray())
             } ?: error("无法读取所选文件")
-            val id = transfers.prepare(assistantId, text)
+            val id = transfers.prepare(assistantId, conversationId, text)
             runImport(id)
             refreshDiagnostics()
         }
     }
 
     fun cancelImport(id: String) = viewModelScope.launch(Dispatchers.IO) {
-        transfers.cancel(id)
+        transfers.cancel(assistantId, conversationId, id)
         importRunner?.cancel()
         refreshDiagnostics()
     }
 
     fun resumeImport(id: String) {
         importRunner = action {
-            transfers.resume(id)
+            transfers.resume(assistantId, conversationId, id)
             runImport(id)
             refreshDiagnostics()
         }
@@ -216,14 +218,14 @@ class SemanticMemoryVM(
 
     private suspend fun refreshDiagnostics() {
         repository.recoverInterruptedDiagnostics()
-        events.value = repository.dao.events(assistantId)
+        events.value = repository.dao.events(assistantId, conversationId)
         allEvents.value = repository.dao.events()
         diskSizes.value = repository.diskSizes()
-        jobs.value = maintenance.jobs(assistantId)
-        imports.value = transfers.jobs(assistantId)
-        dreamRuns.value = dreamManager.runs(assistantId)
-        dreamSchedule.value = dreamScheduler.load(assistantId)
-        val items = repository.list(assistantId)
+        jobs.value = maintenance.jobs(assistantId, conversationId)
+        imports.value = transfers.jobs(assistantId, conversationId)
+        dreamRuns.value = dreamManager.runs(assistantId, conversationId)
+        dreamSchedule.value = dreamScheduler.load(assistantId, conversationId)
+        val items = repository.list(assistantId, conversationId)
         val config = repository.assistantSettings(assistantId)
         val base = config?.let { fingerprintOrNull(it) }
         val valid = items.filter { base != null && repository.validVector(it, base, config?.dimensions) }
@@ -236,7 +238,7 @@ class SemanticMemoryVM(
         val wholeValid = settingsStore.awaitLoaded().assistants.flatMap { assistant ->
             val config = assistant.semanticMemory
             val base = fingerprintOrNull(config)
-            val rows = if (assistant.id.toString() == assistantId) items else repository.list(assistant.id.toString())
+            val rows = repository.dao.listOfAssistant(assistant.id.toString())
             rows.filter { base != null && repository.validVector(it, base, config.dimensions) }
         }
         wholeValidCount.value = wholeValid.size

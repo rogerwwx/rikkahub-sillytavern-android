@@ -13,6 +13,7 @@ data class SemanticDreamScheduleState(
     val status: String = "pending",
     val lastCompletedAt: Long = 0,
     val error: String? = null,
+    val conversationId: String? = null,
 ) {
     fun rescheduled(hash: String, newTurnKey: String, now: Long, delayMillis: Long, manual: Boolean = false): SemanticDreamScheduleState {
         if (!manual && hash == configurationHash && newTurnKey == turnKey) return this

@@ -93,6 +93,7 @@ import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantLocalToolPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantMcpPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantMemoryPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryPage
+import me.rerere.rikkahub.ui.pages.assistant.detail.SemanticMemoryConversationsPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.SemanticDreamSettingsPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantPromptPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantRequestPage
@@ -525,7 +526,10 @@ class RouteActivity : ComponentActivity() {
                             }
 
                             entry<Screen.SemanticMemory> { key ->
-                                SemanticMemoryPage(key.id)
+                                SemanticMemoryPage(key.id, key.conversationId)
+                            }
+                            entry<Screen.SemanticMemoryConversations> { key ->
+                                SemanticMemoryConversationsPage(key.id, key.previousConversationId)
                             }
                             entry<Screen.SemanticDreamSettings> { key ->
                                 SemanticDreamSettingsPage(key.id)
@@ -1013,7 +1017,10 @@ sealed interface Screen : NavKey {
     data class AssistantMemory(val id: String) : Screen
 
     @Serializable
-    data class SemanticMemory(val id: String) : Screen
+    data class SemanticMemory(val id: String, val conversationId: String) : Screen
+
+    @Serializable
+    data class SemanticMemoryConversations(val id: String, val previousConversationId: String? = null) : Screen
 
     @Serializable
     data class SemanticDreamSettings(val id: String) : Screen

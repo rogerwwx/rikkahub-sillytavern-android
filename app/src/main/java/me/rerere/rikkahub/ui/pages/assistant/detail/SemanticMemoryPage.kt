@@ -13,21 +13,25 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.data.memory.semantic.*
+import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.ui.context.LocalNavController
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlin.uuid.Uuid
 
 private val memoryTypes = linkedMapOf("all" to "全部类型", "episodic" to "经历", "factual" to "事实",
     "relational" to "关系", "preference" to "偏好", "planned" to "计划", "unknown" to "未分类")
@@ -36,9 +40,18 @@ private val memoryStatuses = linkedMapOf("all" to "全部状态", "active" to "�
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun SemanticMemoryPage(id: String) {
+fun SemanticMemoryPage(id: String, conversationId: String) {
     val nav = LocalNavController.current
-    val vm: SemanticMemoryVM = koinViewModel(parameters = { parametersOf(id) })
+    val context = LocalContext.current
+    val conversationsRepository: ConversationRepository = koinInject()
+    val conversations by remember(id) { conversationsRepository.getConversationsOfAssistant(Uuid.parse(id)) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val conversationTitle = conversations.firstOrNull { it.id.toString() == conversationId }
+        ?.title?.ifBlank { "未命名对话" }
+    LaunchedEffect(id, conversationId) {
+        context.rememberSemanticMemoryConversation(id, conversationId)
+    }
+    val vm: SemanticMemoryVM = koinViewModel(key = "$id:$conversationId", parameters = { parametersOf(id, conversationId) })
     val settings by vm.settings.collectAsStateWithLifecycle()
     val assistant = settings.assistants.find { it.id.toString() == id }
     val all by vm.memories.collectAsStateWithLifecycle()
@@ -65,10 +78,21 @@ fun SemanticMemoryPage(id: String) {
     }
 
     Scaffold(topBar = {
-        TopAppBar(title = { Text("语义记忆") }, navigationIcon = { BackButton() }, actions = {
+        TopAppBar(title = {
+            Column {
+                Text("语义记忆")
+                conversationTitle?.let {
+                    Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }, navigationIcon = { BackButton() }, actions = {
+            TextButton(onClick = { nav.navigate(Screen.SemanticMemoryConversations(id, conversationId)) }) {
+                Text("切换窗口")
+            }
             TextButton(enabled = assistant != null && !busy, onClick = {
                 isNew = true
-                editor = SemanticMemoryEntity(assistantId = id, content = "")
+                editor = SemanticMemoryEntity(assistantId = id, conversationId = conversationId, content = "")
             }) { Text("新增") }
         })
     }) { padding ->
@@ -91,7 +115,7 @@ fun SemanticMemoryPage(id: String) {
                 0 -> Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
                     OutlinedTextField(value = query, onValueChange = {
                         vm.query.value = it; vm.clearSelection()
-                    }, label = { Text("搜索当前助手的全部语义记忆") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    }, label = { Text("搜索当前窗口的全部语义记忆") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Row {
                         MemoryFilter(type, memoryTypes) { vm.typeFilter.value = it; vm.clearSelection() }
                         MemoryFilter(status, memoryStatuses) { vm.statusFilter.value = it; vm.clearSelection() }
@@ -119,7 +143,7 @@ fun SemanticMemoryPage(id: String) {
                             vm.rebuild(if (selected.isEmpty()) filtered.map { it.id } else selected.toList())
                         }) { Text(if (selected.isEmpty()) "重建筛选结果" else "重建所选") }
                     }
-                    Text("独立文件保留内容、生命周期与元数据；向量缓存不会导入，完成后可重新向量化。", style = MaterialTheme.typography.bodySmall)
+                    Text("导入和导出仅作用于本窗口。跨窗口导入保留原来源，视为用户确认的内容；向量需重新生成。", style = MaterialTheme.typography.bodySmall)
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
                         items(filtered, key = { it.id }) { memory ->
                             Card(Modifier.fillMaxWidth().combinedClickable(onClick = {
@@ -145,12 +169,12 @@ fun SemanticMemoryPage(id: String) {
                 2 -> SemanticDiagnosticsPanel(vm, all.size, busy)
                 3 -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     TextButton(onClick = { nav.navigate(Screen.SemanticDreamSettings(id)) }) { Text("做梦、生命周期与 Jev 设置") }
-                    Text("手动增量做梦", style = MaterialTheme.typography.titleMedium)
+                    Text("本窗口增量做梦", style = MaterialTheme.typography.titleMedium)
                     dreamSchedule?.let { Text("后台状态：${it.status} · 调度尝试 ${it.attempts}") }
                     Text("从最早未处理的完整轮次提取长期变化，包含压缩隐藏的原文。无值得保留的变化也会推进已核验来源的进度；断流、取消或来源变化不会提交草稿。")
                     Row {
                         TextButton(enabled = assistant?.semanticMemory?.enabled == true && !busy, onClick = vm::dream) { Text("开始／重试做梦") }
-                        TextButton(onClick = vm::cancelDream) { Text("取消做梦") }
+                        TextButton(onClick = vm::cancelDream) { Text("取消本窗口任务") }
                     }
                     TextButton(enabled = !busy, onClick = vm::retryDreamEmbedding) { Text("重试做梦向量待办") }
                     Text("指定条目整理：在管理页按主题选择至少两条后使用「整理所选」。原条目归档保留；核心条目默认受保护。", style = MaterialTheme.typography.bodySmall)
@@ -202,10 +226,11 @@ private fun MemoryFilter(value: String, choices: Map<String, String>, onChange: 
 private fun SemanticSettingsPanel(config: SemanticMemorySettings, providers: List<me.rerere.ai.provider.ProviderSetting>,
     busy: Boolean, configure: ((SemanticMemorySettings) -> SemanticMemorySettings) -> Unit, test: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("模型和召回设置由本助手的所有窗口共用，各窗口分别保存记忆。", style = MaterialTheme.typography.bodySmall)
         Row {
             Column(Modifier.weight(1f)) {
                 Text("启用当前助手的语义记忆")
-                Text("启用后自动召回当前助手的语义库；关闭后恢复原记忆行为。", style = MaterialTheme.typography.bodySmall)
+                Text("启用后只召回当前对话窗口的语义记忆；关闭后恢复原记忆行为。", style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = config.enabled, onCheckedChange = { configure { old -> old.copy(enabled = it) } })
         }
@@ -322,7 +347,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, total: Int, busy: Boo
             OutlinedTextField(recallQuery, { vm.recallQuery.value = it }, label = { Text("测试召回查询") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
             TextButton(enabled = !busy && recallQuery.isNotBlank(), onClick = { vm.testRecall() }) { Text("运行真实召回") }
-            Text("测试使用当前助手配置和真实 Embedding/BM25 后端，会计入查询请求与逻辑召回；不会注入聊天。",
+            Text("测试使用当前助手配置，只检索本窗口的记忆，会计入查询请求与逻辑召回；不会注入聊天。",
                 style = MaterialTheme.typography.bodySmall)
             recallResult?.let { result ->
                 Text("本次候选：BM25 ${result.lexicalCandidates}，向量 ${result.vectorCandidates}；最终 ${result.hits.size} 条")
@@ -335,7 +360,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, total: Int, busy: Boo
                     Text("向量是否参与融合：${if (hit.rank.vectorRanked) "是" else "否（仍可由 BM25 命中）"}", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            Text("当前助手：$total 条；有效向量 $valid，失效/待生成 ${total - valid}，维度 ${dimensions.sorted().joinToString().ifEmpty { "未知" }}")
+            Text("当前窗口：$total 条；有效向量 $valid，失效/待生成 ${total - valid}，维度 ${dimensions.sorted().joinToString().ifEmpty { "未知" }}")
             Text("向量索引：Float32 精确余弦扫描；${if (valid > 0) "已就绪" else "等待生成有效向量"}")
             Text("最近成功索引：${indexedAt?.let(::relativeTime) ?: "暂无"}")
             Text("整库 $wholeCount 条；磁盘 ${sizes.values.sum()} 字节（整库，主库 + WAL + SHM）")
@@ -343,7 +368,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, total: Int, busy: Boo
             Text("有效向量要求模型、维度与内容版本一致；过期和归档的日常召回过滤另行统计。", style = MaterialTheme.typography.bodySmall)
             sizes.forEach { (name, bytes) -> Text("$name：$bytes 字节", style = MaterialTheme.typography.bodySmall) }
             Row { Text("显示整库事件统计", Modifier.weight(1f)); Switch(whole, { whole = it }) }
-            Text("${if (whole) "整库" else "当前助手"}持久事件；缓存复用不增加请求或逻辑召回，上次进程中断的未知结果单独统计。",
+            Text("${if (whole) "整库" else "当前窗口"}持久事件；缓存复用不增加请求或逻辑召回，上次进程中断的未知结果单独统计。",
                 style = MaterialTheme.typography.bodySmall)
             Text("网络计数为 generateEmbedding 业务 API 调用，供应商内部连接重试不另计；成功含响应向量校验。平均耗时为已终结事件的单调时钟累计值。",
                 style = MaterialTheme.typography.bodySmall)

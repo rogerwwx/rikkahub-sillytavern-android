@@ -35,7 +35,7 @@ class SemanticDatabaseBackupTest {
     private fun snapshot(): Pair<File, SemanticMemoryEntity> = runBlocking {
         val source = File(directory, "source")
         val snapshot = File(directory, "snapshot")
-        val memory = SemanticMemoryEntity(assistantId = "fixture", content = "小明喜欢杭州龙井茶")
+        val memory = SemanticMemoryEntity(assistantId = "fixture", conversationId = "window", content = "小明喜欢杭州龙井茶")
         val room = SemanticMemoryDatabase.create(context, source.absolutePath)
         try {
             room.dao().insert(memory)
@@ -70,7 +70,7 @@ class SemanticDatabaseBackupTest {
             ))
             assertTrue(search("龙井茶").isEmpty())
             assertEquals(listOf(memory.id), search("咖啡"))
-            room.dao().delete("fixture", listOf(memory.id))
+            room.dao().delete("fixture", "window", listOf(memory.id))
             assertTrue(search("咖啡").isEmpty())
         } finally {
             room.close()
@@ -96,7 +96,7 @@ class SemanticDatabaseBackupTest {
         SemanticDatabaseBackup.validate(context, file)
         val room = SemanticMemoryDatabase.create(context, file.absolutePath)
         try {
-            assertEquals(memory.content, room.dao().get("fixture", memory.id)?.content)
+            assertEquals(memory.content, room.dao().get("fixture", "window", memory.id)?.content)
             assertEquals(listOf(memory.id), room.dao().lexical(SimpleSQLiteQuery(
                 "SELECT id, bm25(semantic_fts) AS score FROM semantic_fts WHERE semantic_fts MATCH jieba_query(?)",
                 arrayOf("龙井茶"),
@@ -124,6 +124,14 @@ class SemanticDatabaseBackupTest {
         DatabaseBackup.open(context, file, SQLiteDatabase.OPEN_READWRITE) { it.version = 9999 }
         assertInvalid(file)
         DatabaseBackup.open(context, file, SQLiteDatabase.OPEN_READWRITE) { assertEquals(9999, it.version) }
+    }
+
+    @Test fun missingWindowIndexIsRejectedEvenWithMatchingRoomHash() {
+        val (file, _) = snapshot()
+        DatabaseBackup.open(context, file, SQLiteDatabase.OPEN_READWRITE) {
+            it.execSQL("DROP INDEX index_semantic_memory_assistantId_conversationId")
+        }
+        assertInvalid(file)
     }
 
     private fun assertInvalid(file: File) {

@@ -25,10 +25,11 @@ import java.util.UUID
 val SEMANTIC_MEMORY_TYPES = setOf("episodic", "factual", "relational", "preference", "planned", "unknown")
 val SEMANTIC_MEMORY_STATUSES = setOf("active", "expired", "dormant", "archived", "superseded", "forgotten")
 
-@Entity(tableName = "semantic_memory", indices = [Index("assistantId")])
+@Entity(tableName = "semantic_memory", indices = [Index(value = ["assistantId", "conversationId"])])
 data class SemanticMemoryEntity(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
     val assistantId: String,
+    val conversationId: String,
     val content: String,
     val type: String = "unknown",
     val importance: Double = 0.5,
@@ -51,7 +52,7 @@ data class SemanticMemoryEntity(
     val lastAccessAt: Long? = null,
 )
 
-@Entity(tableName = "semantic_event", indices = [Index("assistantId")])
+@Entity(tableName = "semantic_event", indices = [Index(value = ["assistantId", "conversationId"])])
 data class SemanticDiagnosticEvent(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
     val assistantId: String,
@@ -62,15 +63,17 @@ data class SemanticDiagnosticEvent(
     val durationNanos: Long = 0,
     val detailJson: String = "{}",
     val error: String? = null,
+    val conversationId: String? = null,
 )
 
-@Entity(tableName = "semantic_job", indices = [Index("assistantId")])
+@Entity(tableName = "semantic_job", indices = [Index(value = ["assistantId", "conversationId"])])
 data class SemanticJobEntity(
     @PrimaryKey val id: String,
     val assistantId: String,
     val kind: String,
     val payloadJson: String,
     val updatedAt: Long = System.currentTimeMillis(),
+    val conversationId: String? = null,
 )
 
 data class SemanticLexicalHit(val id: String, val score: Double)
@@ -90,17 +93,21 @@ data class SemanticMemoryRevision(
 @Dao
 interface SemanticMemoryDAO {
     @Query("""SELECT id, contentVersion, contentHash, updatedAt, status, isCore, expiresAt,
-        embeddingFingerprint, indexedAt FROM semantic_memory WHERE assistantId = :assistantId ORDER BY id""")
-    suspend fun revisions(assistantId: String): List<SemanticMemoryRevision>
+        embeddingFingerprint, indexedAt FROM semantic_memory
+        WHERE assistantId = :assistantId AND conversationId = :conversationId ORDER BY id""")
+    suspend fun revisions(assistantId: String, conversationId: String): List<SemanticMemoryRevision>
+
+    @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId AND conversationId = :conversationId ORDER BY updatedAt DESC, id")
+    suspend fun list(assistantId: String, conversationId: String): List<SemanticMemoryEntity>
 
     @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId ORDER BY updatedAt DESC, id")
-    suspend fun list(assistantId: String): List<SemanticMemoryEntity>
+    suspend fun listOfAssistant(assistantId: String): List<SemanticMemoryEntity>
 
-    @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId ORDER BY updatedAt DESC, id")
-    fun observe(assistantId: String): Flow<List<SemanticMemoryEntity>>
+    @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId AND conversationId = :conversationId ORDER BY updatedAt DESC, id")
+    fun observe(assistantId: String, conversationId: String): Flow<List<SemanticMemoryEntity>>
 
-    @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId AND id = :id")
-    suspend fun get(assistantId: String, id: String): SemanticMemoryEntity?
+    @Query("SELECT * FROM semantic_memory WHERE assistantId = :assistantId AND conversationId = :conversationId AND id = :id")
+    suspend fun get(assistantId: String, conversationId: String, id: String): SemanticMemoryEntity?
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: SemanticMemoryEntity)
@@ -108,17 +115,19 @@ interface SemanticMemoryDAO {
     @Update
     suspend fun put(entity: SemanticMemoryEntity)
 
-    @Query("DELETE FROM semantic_memory WHERE assistantId = :assistantId AND id IN (:ids)")
-    suspend fun delete(assistantId: String, ids: List<String>): Int
+    @Query("DELETE FROM semantic_memory WHERE assistantId = :assistantId AND conversationId = :conversationId AND id IN (:ids)")
+    suspend fun delete(assistantId: String, conversationId: String, ids: List<String>): Int
 
     @Query("""UPDATE semantic_memory SET embedding = :bytes, embeddingFingerprint = :fingerprint,
         embeddingDimension = :dimensions, embeddedVersion = :version, indexedAt = :time
-        WHERE assistantId = :assistantId AND id = :id AND contentVersion = :version AND contentHash = :hash""")
-    suspend fun storeVector(assistantId: String, id: String, version: Int, hash: String,
+        WHERE assistantId = :assistantId AND conversationId = :conversationId
+        AND id = :id AND contentVersion = :version AND contentHash = :hash""")
+    suspend fun storeVector(assistantId: String, conversationId: String, id: String, version: Int, hash: String,
         bytes: ByteArray, fingerprint: String, dimensions: Int, time: Long): Int
 
-    @Query("UPDATE semantic_memory SET accessCount = accessCount + 1, lastAccessAt = :time WHERE assistantId = :assistantId AND id IN (:ids)")
-    suspend fun recordAccess(assistantId: String, ids: List<String>, time: Long)
+    @Query("""UPDATE semantic_memory SET accessCount = accessCount + 1, lastAccessAt = :time
+        WHERE assistantId = :assistantId AND conversationId = :conversationId AND id IN (:ids)""")
+    suspend fun recordAccess(assistantId: String, conversationId: String, ids: List<String>, time: Long)
 
     @RawQuery
     suspend fun lexical(query: SupportSQLiteQuery): List<SemanticLexicalHit>
@@ -126,8 +135,9 @@ interface SemanticMemoryDAO {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun putEvent(event: SemanticDiagnosticEvent)
 
-    @Query("SELECT * FROM semantic_event WHERE (:assistantId IS NULL OR assistantId = :assistantId) ORDER BY startedAt DESC")
-    suspend fun events(assistantId: String? = null): List<SemanticDiagnosticEvent>
+    @Query("""SELECT * FROM semantic_event WHERE (:assistantId IS NULL OR assistantId = :assistantId)
+        AND (:conversationId IS NULL OR conversationId = :conversationId) ORDER BY startedAt DESC""")
+    suspend fun events(assistantId: String? = null, conversationId: String? = null): List<SemanticDiagnosticEvent>
 
     @Query("SELECT * FROM semantic_event WHERE id = :id")
     suspend fun getEvent(id: String): SemanticDiagnosticEvent?
@@ -138,12 +148,12 @@ interface SemanticMemoryDAO {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun putJob(job: SemanticJobEntity)
 
-    @Query("""SELECT id, assistantId, kind, updatedAt, length(payloadJson) AS payloadLength,
+    @Query("""SELECT id, assistantId, conversationId, kind, updatedAt, length(payloadJson) AS payloadLength,
         CASE WHEN length(payloadJson) <= 16384 THEN payloadJson ELSE NULL END AS inlinePayload
         FROM semantic_job WHERE id = :id""")
     suspend fun jobHeader(id: String): SemanticJobHeader?
 
-    @Query("""SELECT id, assistantId, kind, updatedAt, length(payloadJson) AS payloadLength,
+    @Query("""SELECT id, assistantId, conversationId, kind, updatedAt, length(payloadJson) AS payloadLength,
         CASE WHEN length(payloadJson) <= 16384 THEN payloadJson ELSE NULL END AS inlinePayload
         FROM semantic_job WHERE assistantId = :assistantId ORDER BY updatedAt DESC""")
     suspend fun jobHeaders(assistantId: String): List<SemanticJobHeader>
@@ -151,7 +161,7 @@ interface SemanticMemoryDAO {
     @Query("SELECT substr(payloadJson, :offset, :length) FROM semantic_job WHERE id = :id")
     suspend fun jobPayloadSlice(id: String, offset: Int, length: Int): String?
 
-    // 同一读事务防止恢复大任务时拼接到不同修订的进度；既有单行存储无需迁移。
+    // 同一读事务防止恢复大任务时拼接到不同修订的进度。
     @Transaction
     suspend fun getJob(id: String): SemanticJobEntity? = jobHeader(id)?.let { materializeJob(it) }
 
@@ -162,6 +172,7 @@ interface SemanticMemoryDAO {
         header.id, header.assistantId, header.kind,
         readSemanticJobPayload(header) { offset, length -> jobPayloadSlice(header.id, offset, length) },
         header.updatedAt,
+        header.conversationId,
     )
 
     @Query("DELETE FROM semantic_job WHERE id = :id")
@@ -175,7 +186,7 @@ abstract class SemanticMemoryDatabase : RoomDatabase() {
 
     companion object {
         const val NAME = "semantic_memory.db"
-        const val VERSION = 1
+        const val VERSION = 2
 
         fun create(context: Context, name: String = NAME): SemanticMemoryDatabase =
             Room.databaseBuilder(context, SemanticMemoryDatabase::class.java, name)

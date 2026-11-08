@@ -6,8 +6,8 @@ import me.rerere.ai.ui.UIMessage
 object SemanticMemoryInjectionSmoke {
     @JvmStatic fun main(args: Array<String>) {
         val config = SemanticMemorySettings(enabled = true, dream = SemanticDreamSettings(injectionTokenBudget = 128))
-        val large = SemanticMemoryEntity(id = "large", assistantId = "assistant", content = "过长正文".repeat(200), isCore = true)
-        val small = SemanticMemoryEntity(id = "small", assistantId = "assistant", content = "用户喜欢茶")
+        val large = SemanticMemoryEntity(id = "large", assistantId = "assistant", conversationId = "window", content = "过长正文".repeat(200), isCore = true)
+        val small = SemanticMemoryEntity(id = "small", assistantId = "assistant", conversationId = "window", content = "用户喜欢茶")
         val result = SemanticRecallResult(listOf(large, small).map { SemanticRecallHit(it, SemanticRankHit(it.id, null, null, 1.0)) },
             2, 0, emptyMap(), emptyList(), 0, "fixture")
         val bounded = budgetSemanticRecall(result, config)

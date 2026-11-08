@@ -248,7 +248,8 @@ class BackupManagerTest {
         )
         val vector = SemanticVectors.encode(listOf(1f, 0f))
         val memory = SemanticMemoryEntity(
-            id = "fixture-memory", assistantId = assistantId.toString(), content = "小明喜欢杭州龙井茶",
+            id = "fixture-memory", assistantId = assistantId.toString(), conversationId = conversation.id.toString(),
+            content = "小明喜欢杭州龙井茶",
             embedding = vector, embeddingDimension = 2, embeddingFingerprint = "fixture:2",
             embeddedVersion = 1, indexedAt = 123L, sourceJson = JsonInstant.encodeToString(listOf(source)),
             metadataJson = """{"origin":"dream","scope":"user"}""",
@@ -256,16 +257,18 @@ class BackupManagerTest {
         val cursorId = "dream_cursor:$assistantId:${conversation.id}"
         val jobs = listOf(
             SemanticJobEntity(cursorId, assistantId.toString(), "dream_cursor",
-                """{"schemaVersion":1,"chunks":1,"continuity":"fixture","successfulRuns":2}"""),
-            SemanticJobEntity("$cursorId:sources:0", assistantId.toString(), "dream_cursor_sources", memory.sourceJson),
+                """{"schemaVersion":1,"chunks":1,"continuity":"fixture","successfulRuns":2}""", conversationId = conversation.id.toString()),
+            SemanticJobEntity("$cursorId:sources:0", assistantId.toString(), "dream_cursor_sources", memory.sourceJson,
+                conversationId = conversation.id.toString()),
             SemanticJobEntity("fixture-embedding", assistantId.toString(), "dream_embedding",
-                """{"versions":{"fixture-memory":1},"hashes":{},"errors":{}}"""),
+                """{"versions":{"fixture-memory":1},"hashes":{},"errors":{}}""", conversationId = conversation.id.toString()),
         )
         semanticDatabase.dao().insert(memory)
         semanticDatabase.dao().insert(memory.copy(id = "other-memory", assistantId = "other"))
+        semanticDatabase.dao().insert(memory.copy(id = "other-window-memory", conversationId = Uuid.random().toString()))
         val event = SemanticDiagnosticEvent(
             id = "fixture-event", assistantId = assistantId.toString(), operation = "embedding",
-            purpose = "save", status = "success",
+            purpose = "save", status = "success", conversationId = conversation.id.toString(),
         )
         semanticDatabase.dao().putEvent(event)
         jobs.forEach { semanticDatabase.dao().putJob(it) }
@@ -279,11 +282,13 @@ class BackupManagerTest {
                 it.jsonObject.getValue("id").jsonPrimitive.content == assistantId.toString()
             })
         }
-        semanticDatabase.dao().delete(assistantId.toString(), listOf(memory.id))
+        semanticDatabase.dao().delete(assistantId.toString(), conversation.id.toString(), listOf(memory.id))
         manager.stageRestore(archive, includeDatabase = true, includeFiles = false)
-        assertEquals(null, semanticDatabase.dao().get(assistantId.toString(), memory.id))
+        assertEquals(null, semanticDatabase.dao().get(assistantId.toString(), conversation.id.toString(), memory.id))
         applyStagedDatabases()
-        val restored = requireNotNull(semanticDatabase.dao().get(assistantId.toString(), memory.id))
+        val restored = requireNotNull(semanticDatabase.dao().get(assistantId.toString(), conversation.id.toString(), memory.id))
+        assertEquals(conversation.id.toString(), restored.conversationId)
+        assertEquals(null, semanticDatabase.dao().get(assistantId.toString(), conversation.id.toString(), "other-window-memory"))
         assertTrue(vector.contentEquals(restored.embedding))
         assertEquals(memory.sourceJson, restored.sourceJson)
         assertEquals(memory.metadataJson, restored.metadataJson)
@@ -291,7 +296,7 @@ class BackupManagerTest {
         assertEquals(memory.indexedAt, restored.indexedAt)
         assertEquals(event, semanticDatabase.dao().getEvent(event.id))
         assertEquals(jobs.toSet(), semanticDatabase.dao().jobs(assistantId.toString()).toSet())
-        assertEquals(null, semanticDatabase.dao().get("other", memory.id))
+        assertEquals(null, semanticDatabase.dao().get("other", conversation.id.toString(), memory.id))
         val restoredConversation = requireNotNull(conversationRepository.getConversationById(conversation.id))
         assertEquals(assistantId, restoredConversation.assistantId)
         assertEquals(user.id, restoredConversation.messageNodes.first().currentMessage.id)
@@ -301,8 +306,8 @@ class BackupManagerTest {
         assertEquals(listOf(memory.id), semanticDatabase.dao().lexical(SimpleSQLiteQuery(
             """SELECT m.id, bm25(semantic_fts) AS score FROM semantic_fts
                 JOIN semantic_memory m ON m.id=semantic_fts.id
-                WHERE semantic_fts MATCH jieba_query(?) AND m.assistantId=?""",
-            arrayOf("龙井茶", assistantId.toString()),
+                WHERE semantic_fts MATCH jieba_query(?) AND m.assistantId=? AND m.conversationId=?""",
+            arrayOf("龙井茶", assistantId.toString(), conversation.id.toString()),
         )).map { it.id })
     }
 
@@ -318,30 +323,30 @@ class BackupManagerTest {
     }
 
     @Test fun oldMainDatabaseBackupClearsAllOldSemanticTables() = runBlocking {
-        semanticDatabase.dao().insert(SemanticMemoryEntity(assistantId = "fixture", content = "old semantic"))
+        semanticDatabase.dao().insert(SemanticMemoryEntity(assistantId = "fixture", conversationId = "window", content = "old semantic"))
         semanticDatabase.dao().putJob(SemanticJobEntity("old-job", "fixture", "dream_cursor", "{}"))
         semanticDatabase.dao().putEvent(SemanticDiagnosticEvent(assistantId = "fixture", operation = "recall", purpose = "chat"))
         val archive = archiveWithDatabases()
         manager.stageRestore(archive, includeDatabase = true, includeFiles = false)
-        assertEquals(1, semanticDatabase.dao().list("fixture").size)
+        assertEquals(1, semanticDatabase.dao().list("fixture", "window").size)
         applyStagedDatabases()
-        assertTrue(semanticDatabase.dao().list("fixture").isEmpty())
+        assertTrue(semanticDatabase.dao().list("fixture", "window").isEmpty())
         assertTrue(semanticDatabase.dao().jobs("fixture").isEmpty())
         assertTrue(semanticDatabase.dao().events().isEmpty())
     }
 
     @Test fun settingsOnlyRestoreDoesNotClearSemanticEvenWhenDatabaseOptionIsSelected() = runBlocking {
-        val memory = SemanticMemoryEntity(assistantId = "fixture", content = "keep semantic")
+        val memory = SemanticMemoryEntity(assistantId = "fixture", conversationId = "window", content = "keep semantic")
         semanticDatabase.dao().insert(memory)
         val archive = manager.createBackup(includeDatabase = false, includeFiles = false)
         manager.stageRestore(archive, includeDatabase = true, includeFiles = false)
         applyStagedDatabases()
-        assertEquals(memory.content, semanticDatabase.dao().get("fixture", memory.id)?.content)
+        assertEquals(memory.content, semanticDatabase.dao().get("fixture", "window", memory.id)?.content)
         assertEquals("live", probe(liveDatabase))
     }
 
     @Test fun excludedDatabaseIgnoresCorruptSemanticEntryAndKeepsBothLiveDatabases() = runBlocking {
-        val memory = SemanticMemoryEntity(assistantId = "fixture", content = "keep semantic")
+        val memory = SemanticMemoryEntity(assistantId = "fixture", conversationId = "window", content = "keep semantic")
         semanticDatabase.dao().insert(memory)
         val source = manager.createBackup(includeDatabase = false, includeFiles = false)
         val archive = File(directory, "excluded-corrupt.zip")
@@ -357,7 +362,7 @@ class BackupManagerTest {
         }
         manager.stageRestore(archive, includeDatabase = false, includeFiles = false)
         applyStagedDatabases()
-        assertEquals(memory.content, semanticDatabase.dao().get("fixture", memory.id)?.content)
+        assertEquals(memory.content, semanticDatabase.dao().get("fixture", "window", memory.id)?.content)
         assertEquals("live", probe(liveDatabase))
     }
 

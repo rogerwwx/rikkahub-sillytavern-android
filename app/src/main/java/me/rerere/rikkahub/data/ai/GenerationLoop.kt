@@ -361,7 +361,7 @@ class GenerationLoop(
             val semanticConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: assistant.semanticMemory.normalized()
             var requestAssistant = assistant.copy(semanticMemory = semanticConfig)
             toolsInternal = toolsInternal.filterNot { it.name.startsWith("memory_") || it.name == "memory_tool" } +
-                if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant) else emptyList()
+                if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant, conversationId?.toString()) else emptyList()
             statusTrackedTools = trackToolStatus(toolsInternal)
             if (systemMemoryMode != semanticConfig.enabled) {
                 prebuiltSystemMessages = buildCachedSystemPrompt(requestAssistant, settings, messages,
@@ -378,18 +378,18 @@ class GenerationLoop(
 
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
-                if (semanticConfig.enabled) {
+                if (semanticConfig.enabled && conversationId != null) {
                     conversationId?.let { id ->
                         UserContextAnchorCache.getOrCreate(id).blocks.removeAll { it.tag == ANCHOR_TAG_MEMORY }
                     }
-                    val revision = semanticMemoryRepo.recallRevision(assistant.id.toString(), semanticConfig) +
+                    val revision = semanticMemoryRepo.recallRevision(assistant.id.toString(), conversationId.toString(), semanticConfig) +
                         if (semanticConfig.dream.jevEnabled && semanticConfig.dream.jevRecall)
                             semanticJevAssist.configurationRevision() else ""
                     if (revision != semanticRevision) {
                         semanticRecall = if (semanticQuery.isBlank()) null else {
                             val base = budgetSemanticRecall(
-                                semanticMemoryRepo.recall(assistant.id.toString(), semanticQuery, semanticConfig), semanticConfig)
-                            val screened = semanticJevAssist.filterRecall(assistant.id.toString(), semanticQuery,
+                                semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticQuery, semanticConfig), semanticConfig)
+                            val screened = semanticJevAssist.filterRecall(assistant.id.toString(), conversationId.toString(), semanticQuery,
                                 messages.takeLast(6).joinToString("\n") { "${it.role}: ${it.toText()}" }.take(6000),
                                 semanticConfig, base)
                             budgetSemanticRecall(screened, semanticConfig)
@@ -407,7 +407,7 @@ class GenerationLoop(
                     semanticRecall = null
                     requestAssistant = assistant.copy(semanticMemory = latestConfig)
                     toolsInternal = toolsInternal.filterNot { it.name.startsWith("memory_") || it.name == "memory_tool" } +
-                        if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant) else emptyList()
+                        if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant, conversationId?.toString()) else emptyList()
                     statusTrackedTools = trackToolStatus(toolsInternal)
                     if (systemMemoryMode != latestConfig.enabled) {
                         prebuiltSystemMessages = buildCachedSystemPrompt(requestAssistant, settings, messages,
@@ -415,8 +415,8 @@ class GenerationLoop(
                         systemMemoryMode = latestConfig.enabled
                     }
                 }
-                if (semanticRecall != null && latestConfig.dream.jevEnabled && latestConfig.dream.jevRecall) {
-                    val currentRevision = semanticMemoryRepo.recallRevision(assistant.id.toString(), latestConfig) +
+                if (semanticRecall != null && conversationId != null && latestConfig.dream.jevEnabled && latestConfig.dream.jevRecall) {
+                    val currentRevision = semanticMemoryRepo.recallRevision(assistant.id.toString(), conversationId.toString(), latestConfig) +
                         semanticJevAssist.configurationRevision()
                     if (currentRevision != semanticRevision) {
                         semanticRevision = null

@@ -1511,6 +1511,7 @@ class ChatService(
                     settings = settings,
                     assistant = assistant,
                     model = model,
+                    conversationId = conversationId,
                     workspaceCwd = conversation.workspaceCwd,
                 )
             } catch (error: InvalidMcpServerNamesException) {
@@ -1623,11 +1624,11 @@ class ChatService(
                     // 且受「允许调用工具」开关控制。记忆、技能、MCP、任务、
                     // 生活/情侣空间等一律不注册。
                     if (settings.huadengSettings.enableTavernMode) {
-                        addAll(buildTavernModeTools(assistant, settings, useExternalWebSearch))
+                        addAll(buildTavernModeTools(assistant, settings, useExternalWebSearch, conversationId))
                         return@buildList
                     }
                     // 记忆工具：会和记忆库内容一起进请求，缺了它模型只能说自己没有写记忆的工具
-                    addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant))
+                    addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant, conversationId.toString()))
                     if (assistant.localTools.contains(LocalToolOption.FileTools)) {
                         addAll(createFileTools(context = context))
                     }
@@ -2168,6 +2169,7 @@ class ChatService(
         assistant: Assistant,
         settings: Settings,
         useExternalWebSearch: Boolean,
+        conversationId: Uuid?,
     ): List<Tool> = buildList {
         // 关闭「保留工具」后退化为纯文本模型，请求中不含任何工具（插件工具一并去掉）
         if (!settings.huadengSettings.tavernModeKeepTools) return@buildList
@@ -2177,7 +2179,7 @@ class ChatService(
         addAll(pluginToolProvider.getTools())
 
         // 记忆：助手开着就有，酒馆模式不额外剥夺
-        addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant))
+        addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant, conversationId?.toString()))
 
         // 只留与聊天/创作直接相关、且不注入额外上下文的基础工具
         if (assistant.localTools.contains(LocalToolOption.FileTools)) {
@@ -2262,11 +2264,12 @@ class ChatService(
                             assistant,
                             settings,
                             shouldUseExternalWebSearch(assistant, model),
+                            conversationId,
                         )
                     )
                     return@buildList
                 }
-                addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant))
+                addAll(buildAssistantMemoryTools(memoryRepository, semanticMemoryRepository, assistant, conversationId?.toString()))
                 if (assistant.localTools.contains(LocalToolOption.FileTools)) {
                     addAll(createFileTools(context = context))
                 }

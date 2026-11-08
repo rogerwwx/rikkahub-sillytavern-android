@@ -11,6 +11,8 @@ data class SemanticDreamSettings(
     val idleMinutes: Int = 2,
     val reviewIntervalHours: Int = 24,
     val modelId: Uuid? = null,
+    val reflectionPrompt: String = "",
+    val consolidationPrompt: String = "",
     val temperature: Double = 0.2,
     val reasoningLevel: String = "off",
     val maxOutputTokens: Int = 4096,
