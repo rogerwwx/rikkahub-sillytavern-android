@@ -18,6 +18,13 @@ object SemanticDreamScheduleSmoke {
         check(completed.status == "completed" && completed.lastCompletedAt == 60000L)
         check(completed.rescheduled("config", "turn1", 90000, 0).status == "completed")
         check(completed.rescheduled("config", "turn1", 90000, 0, manual = true).status == "pending")
+        val range = SemanticDreamRange("request", "start", "end")
+        val manual = completed.copy(manualRange = range, status = "running")
+        check(manual.afterRun("pending", 90000, config, null).manualRange == range)
+        check(manual.afterRun("completed", 90000, config, null).manualRange == range)
+        check(manual.rescheduled("config", "next-turn", 90000, 0).manualRange == null)
+        val encoded = kotlinx.serialization.json.Json.encodeToString(SemanticDreamScheduleState.serializer(), manual)
+        check(kotlinx.serialization.json.Json.decodeFromString<SemanticDreamScheduleState>(encoded).manualRange == range)
         println("SemanticDreamScheduleSmoke: PASS（持久失败、退避、来源变化与手动恢复）")
     }
 }

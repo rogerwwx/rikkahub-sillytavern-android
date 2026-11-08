@@ -28,6 +28,66 @@ data class DreamCursor(
     val successfulRuns: Int = 0,
 )
 
+@Serializable
+data class SemanticDreamRange(
+    val id: String,
+    val startMessageId: String,
+    val endMessageId: String,
+) {
+    fun positions(messages: List<DreamMessage>): IntRange {
+        val start = messages.indexOfFirst { it.messageId == startMessageId }
+        val end = messages.indexOfFirst { it.messageId == endMessageId }
+        require(start >= 0 && end >= start) { "所选历史范围已变化，请重新选择起止消息" }
+        require(dreamCompleteTurns(messages).any { it.first().index >= start && it.last().index <= end }) {
+            "所选范围没有完整轮次，请从用户消息选到对应的助手回复"
+        }
+        return start..end
+    }
+}
+
+data class SemanticDreamHistoryMessage(
+    val messageId: String, val position: Int, val role: String, val text: String,
+    val createdAt: Long, val processed: Boolean,
+)
+
+data class SemanticDreamHistory(
+    val messages: List<SemanticDreamHistoryMessage>, val completedTurns: Int,
+    val processedTurns: Int, val pendingTurns: Int, val successfulRuns: Int,
+)
+
+private fun stableDreamCursor(messages: List<DreamMessage>, cursor: DreamCursor): DreamCursor {
+    val valid = cursor.processed.takeWhile { source ->
+        messages.getOrNull(source.position)?.let { it.nodeId == source.nodeId && it.messageId == source.messageId } == true &&
+            validDreamSources(listOf(source), messages)
+    }
+    return if (valid.size == cursor.processed.size) cursor else cursor.copy(processed = valid, continuity = "")
+}
+
+fun mergeDreamCoverage(messages: List<DreamMessage>, cursor: DreamCursor, evidence: List<DreamSource>): DreamCursor {
+    val processed = mutableListOf<DreamSource>()
+    (stableDreamCursor(messages, cursor).processed + evidence).sortedWith(
+        compareBy<DreamSource> { it.position }.thenBy { it.start }
+    ).forEach { source ->
+        val last = processed.lastOrNull()
+        if (last != null && last.messageId == source.messageId && last.contentHash == source.contentHash &&
+            source.start <= last.end) {
+            processed[processed.lastIndex] = last.copy(end = maxOf(last.end, source.end))
+        } else processed += source
+    }
+    return cursor.copy(processed = processed)
+}
+
+fun dreamHistory(messages: List<DreamMessage>, cursor: DreamCursor): SemanticDreamHistory {
+    val consumed = stableDreamCursor(messages, cursor).processed.groupBy { it.messageId }
+        .mapValues { (_, sources) -> sources.maxOf { it.end } }
+    val turns = dreamCompleteTurns(messages)
+    val processedTurns = turns.count { turn -> turn.all { (consumed[it.value.messageId] ?: 0) >= it.value.text.length } }
+    return SemanticDreamHistory(turns.flatten().map { (position, message) ->
+        SemanticDreamHistoryMessage(message.messageId, position, message.role, message.text, message.createdAt,
+            (consumed[message.messageId] ?: 0) >= message.text.length)
+    }, turns.size, processedTurns, turns.size - processedTurns, cursor.successfulRuns)
+}
+
 data class DreamWindow(
     val evidence: List<DreamSource>, val context: String, val transcript: String,
     val nextCursor: DreamCursor, val completeTurns: Int,
@@ -114,24 +174,16 @@ fun dreamWindow(
     conversationId: String, messages: List<DreamMessage>, cursor: DreamCursor,
     charBudget: Int, overlapTurns: Int, segmentGapMinutes: Int = 180, splitByDay: Boolean = true,
     messageOverhead: Int = 0,
+    firstPosition: Int = 0, lastPosition: Int = messages.lastIndex,
 ): DreamWindow? {
     require(charBudget > 0)
-    val validPrefix = cursor.processed.takeWhile { source ->
-        messages.getOrNull(source.position)?.let { it.nodeId == source.nodeId && it.messageId == source.messageId } == true &&
-            validDreamSources(listOf(source), messages)
-    }
-    val stableCursor = if (validPrefix.size == cursor.processed.size) cursor else cursor.copy(processed = validPrefix, continuity = "")
+    val stableCursor = stableDreamCursor(messages, cursor)
+    val validPrefix = stableCursor.processed
     val turns = dreamCompleteTurns(messages)
     val consumed = validPrefix.groupBy { it.messageId }.mapValues { (_, sources) -> sources.maxOf { it.end } }
-    val pending = turns.filter { turn -> turn.any { (consumed[it.value.messageId] ?: 0) < it.value.text.length } }
+    val pending = turns.filter { turn -> turn.first().index >= firstPosition && turn.last().index <= lastPosition &&
+        turn.any { (consumed[it.value.messageId] ?: 0) < it.value.text.length } }
     if (pending.isEmpty()) return null
-    val firstPendingPosition = pending.first().first { (consumed[it.value.messageId] ?: 0) < it.value.text.length }.index
-    if (validPrefix.any { it.position > firstPendingPosition }) {
-        // 曾跳过的未完成轮次后来完成：从该锚点补回，不让较后的游标丢掉它。
-        return dreamWindow(conversationId, messages, cursor.copy(
-            processed = validPrefix.takeWhile { it.position < firstPendingPosition }, continuity = ""),
-            charBudget, overlapTurns, segmentGapMinutes, splitByDay, messageOverhead)
-    }
     val evidence = mutableListOf<DreamSource>()
     var remaining = charBudget
     var completed = 0
@@ -180,14 +232,7 @@ fun dreamWindow(
         "[新证据 id=${source.evidenceId} role=${source.role} date=${source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)} offset=${source.start}:${source.end}]\n" +
             messages[source.position].text.substring(source.start, source.end)
     }
-    val processed = validPrefix.toMutableList()
-    evidence.forEach { source ->
-        val last = processed.lastOrNull()
-        if (last != null && last.messageId == source.messageId && last.contentHash == source.contentHash && last.end == source.start)
-            processed[processed.lastIndex] = last.copy(end = source.end)
-        else processed += source
-    }
-    return DreamWindow(evidence, context, transcript, stableCursor.copy(processed = processed), completed)
+    return DreamWindow(evidence, context, transcript, mergeDreamCoverage(messages, stableCursor, evidence), completed)
 }
 
 fun dreamExpiry(type: String, isCore: Boolean, evidenceAt: Long, ttlDays: Map<String, Int>): Long? =

@@ -117,10 +117,24 @@ class SemanticDreamManager(
         val settings = repository.assistantSettings(assistantId)?.takeIf { it.enabled } ?: return null
         val messages = conversation.dreamMessages()
         val cursor = cursor(assistantId, conversation.id.toString())
-        val next = window(conversation.id.toString(), messages, cursor, settings) ?: return null
-        val firstPosition = next.evidence.first().position
-        val count = dreamCompleteTurns(messages).count { it.last().index >= firstPosition }
+        window(conversation.id.toString(), messages, cursor, settings) ?: return null
+        val count = dreamHistory(messages, cursor).pendingTurns
         return SemanticDreamPending(assistantId, conversation.id.toString(), count)
+    }
+
+    suspend fun history(assistantId: String, conversationId: String): SemanticDreamHistory? {
+        val snapshot = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId } ?: return null
+        return dreamHistory(snapshot.messages, cursor(assistantId, conversationId))
+    }
+
+    suspend fun selectRange(assistantId: String, conversationId: String, startMessageId: String? = null,
+        endMessageId: String? = null): SemanticDreamRange {
+        val messages = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId }?.messages
+            ?: error("当前对话已删除或移出助手")
+        val complete = dreamCompleteTurns(messages).flatten()
+        require(complete.isNotEmpty()) { "当前窗口还没有可总结的完整轮次" }
+        return SemanticDreamRange(Uuid.random().toString(), startMessageId ?: complete.first().value.messageId,
+            endMessageId ?: complete.last().value.messageId).also { it.positions(messages) }
     }
 
     suspend fun pendingAssistants(): List<String> = settingsStore.awaitLoaded().assistants
@@ -189,6 +203,29 @@ class SemanticDreamManager(
         process(assistantId, conversationId, false) ?: SemanticDreamRun("completed")
     }
 
+    /** 固定点击时的起止消息；任务每批有界执行，后续重试沿专用游标继续，成功证据同时并入自动游标。 */
+    suspend fun runRange(assistantId: String, conversationId: String, range: SemanticDreamRange): SemanticDreamRun =
+        exclusive(assistantId, conversationId) {
+            val settings = config(assistantId)
+            reconcileSources(assistantId, conversationId)
+            maintainLifecycle(assistantId, conversationId)
+            var segments = 0
+            var changed = 0
+            while (segments < settings.dream.maxSegmentsPerRun) {
+                currentCoroutineContext().ensureActive()
+                val result = process(assistantId, conversationId, false, range) ?: break
+                segments += result.processedSegments
+                changed += result.changed
+                if (result.status != "completed") return@exclusive result.copy(processedSegments = segments, changed = changed)
+            }
+            val snapshot = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId }
+                ?: error("当前对话已删除或移出助手")
+            val positions = range.positions(snapshot.messages)
+            val remaining = window(conversationId, snapshot.messages, cursor(assistantId, conversationId, range.id),
+                settings, positions) != null
+            SemanticDreamRun(if (remaining) "pending" else "completed", segments, changed)
+        }
+
     private suspend fun <T> exclusive(assistantId: String, conversationId: String? = null, block: suspend () -> T): T =
         locks.getOrPut(assistantId) { Mutex() }.withLock {
             val run = conversationId to currentCoroutineContext().job
@@ -196,10 +233,11 @@ class SemanticDreamManager(
             try { withContext(SnapshotCache()) { block() } } finally { running.remove(assistantId, run) }
         }
 
-    private fun cursorId(assistantId: String, conversationId: String) = "dream_cursor:$assistantId:$conversationId"
+    private fun cursorId(assistantId: String, conversationId: String, rangeId: String? = null) =
+        "dream_cursor:$assistantId:$conversationId" + (rangeId?.let { ":range:$it" } ?: "")
 
-    private suspend fun cursor(assistantId: String, conversationId: String): DreamCursor {
-        val id = cursorId(assistantId, conversationId)
+    private suspend fun cursor(assistantId: String, conversationId: String, rangeId: String? = null): DreamCursor {
+        val id = cursorId(assistantId, conversationId, rangeId)
         val job = repository.dao.getJob(id) ?: return DreamCursor()
         val manifest = json.decodeFromString<DreamCursorManifest>(job.payloadJson)
         require(manifest.schemaVersion == 1 && manifest.chunks >= 0) { "做梦游标格式无效" }
@@ -211,8 +249,8 @@ class SemanticDreamManager(
     }
 
     /** 来源按最多50条存储分片，避免长历史游标变成超大 CursorWindow 单行。 */
-    private suspend fun putCursor(assistantId: String, conversationId: String, cursor: DreamCursor) {
-        val id = cursorId(assistantId, conversationId)
+    private suspend fun putCursor(assistantId: String, conversationId: String, cursor: DreamCursor, rangeId: String? = null) {
+        val id = cursorId(assistantId, conversationId, rangeId)
         val chunks = cursor.processed.chunked(50)
         val old = repository.dao.getJob(id)?.let { json.decodeFromString<DreamCursorManifest>(it.payloadJson) }
         chunks.forEachIndexed { index, sources ->
@@ -227,20 +265,25 @@ class SemanticDreamManager(
             conversationId = conversationId))
     }
 
-    private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor, config: SemanticMemorySettings): DreamWindow? {
+    private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor, config: SemanticMemorySettings,
+        positions: IntRange = 0..messages.lastIndex): DreamWindow? {
         // 为提示词、旧事实、来源标签和重叠轮次预留预算；汉字按至少一个 token 保守计算。
         val budget = (config.dream.maxInputTokens - 1800).coerceAtLeast(512) / 2
         return dreamWindow(id, messages, cursor, budget, config.dream.overlapTurns,
-            config.dream.segmentGapMinutes, config.dream.splitByDay, messageOverhead = 180)
+            config.dream.segmentGapMinutes, config.dream.splitByDay, messageOverhead = 180,
+            firstPosition = positions.first, lastPosition = positions.last)
     }
 
-    private suspend fun process(assistantId: String, conversationId: String, automatic: Boolean): SemanticDreamRun? {
+    private suspend fun process(assistantId: String, conversationId: String, automatic: Boolean,
+        range: SemanticDreamRange? = null): SemanticDreamRun? {
         val config = config(assistantId)
         if (automatic && !config.dream.automatic) return SemanticDreamRun("cancelled")
         val snapshot = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId } ?: return null
         val conversation = snapshot.conversation
         val oldCursor = cursor(assistantId, conversationId)
-        val window = window(conversationId, snapshot.messages, oldCursor, config) ?: return null
+        val progressCursor = if (range == null) oldCursor else cursor(assistantId, conversationId, range.id)
+        val positions = range?.positions(snapshot.messages) ?: (0..snapshot.messages.lastIndex)
+        val window = window(conversationId, snapshot.messages, progressCursor, config, positions) ?: return null
         val modelSettings = settingsStore.awaitLoaded()
         val stream = modelSettings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
             ?: error("助手已删除")
@@ -250,7 +293,7 @@ class SemanticDreamManager(
             ?.copyProvider() ?: error("做梦提供商已失效")
         val signature = dreamHash(stream.toString() + json.encodeToString(config.dream) + json.encodeToString(providerSetting) + json.encodeToString(model))
         val cursorRevision = dreamHash(json.encodeToString(oldCursor))
-        val runId = "dream_run:" + dreamHash("$assistantId:$conversationId:${window.evidence.joinToString { it.evidenceId }}:$signature:$cursorRevision")
+        val runId = "dream_run:" + dreamHash("$assistantId:$conversationId:${range?.id ?: ""}:${window.evidence.joinToString { it.evidenceId }}:$signature:$cursorRevision")
         val previous = repository.dao.getJob(runId)?.let { json.decodeFromString<SemanticDreamRunState>(it.payloadJson) }
         if (previous?.status == "completed") return SemanticDreamRun("failed", error = "运行已经提交但来源游标不匹配，请检查恢复来源")
         val now = System.currentTimeMillis()
@@ -305,15 +348,22 @@ class SemanticDreamManager(
                     json.encodeToString(liveProvider.copyProvider()) + json.encodeToString(liveModel)) == signature) { "做梦模型或端点已变化" }
                 val latest = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId }
                     ?: error("来源对话已删除或换助手")
+                range?.positions(latest.messages)
                 require(validDreamSources(window.nextCursor.processed, latest.messages)) { "来源消息已编辑或切换分支" }
                 repository.database.withTransaction {
                     require(cursor(assistantId, conversationId) == oldCursor) { "做梦游标已变化" }
+                    if (range != null) require(cursor(assistantId, conversationId, range.id) == progressCursor) { "手动范围进度已变化" }
                     val mutations = planDreamChanges(assistantId, runId, draft, window, repository.list(assistantId, conversationId), config.dream, now)
                     applyMutations(mutations)
                     changed = mutations.size
-                    val nextCursor = window.nextCursor.copy(continuity = draft.continuity ?: window.nextCursor.continuity,
+                    val nextCursor = (if (range == null) window.nextCursor else
+                        mergeDreamCoverage(latest.messages, oldCursor, window.evidence)).copy(
+                        continuity = if (range == null) draft.continuity ?: window.nextCursor.continuity else "",
                         successfulRuns = oldCursor.successfulRuns + 1)
                     putCursor(assistantId, conversationId, nextCursor)
+                    if (range != null) putCursor(assistantId, conversationId, window.nextCursor.copy(
+                        continuity = draft.continuity ?: window.nextCursor.continuity,
+                        successfulRuns = progressCursor.successfulRuns + 1), range.id)
                     val versions = mutations.filter { it.after.status == "active" && it.after.embedding == null }.associate { it.after.id to it.after.contentVersion }
                     if (versions.isNotEmpty()) repository.dao.putJob(SemanticJobEntity("dream_embedding:$runId", assistantId,
                         "dream_embedding", json.encodeToString(DreamEmbeddingTodo(versions,

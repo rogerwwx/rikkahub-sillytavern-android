@@ -85,11 +85,11 @@ class SemanticDreamScheduler(
     }
 
     /** 应用级作用域让用户离开设置页后继续运行；失败草稿和窗口由 Manager 恢复。 */
-    fun manual(assistantId: String, conversationId: String? = null) = scope.launch {
+    fun manual(assistantId: String, conversationId: String? = null, range: SemanticDreamRange? = null) = scope.launch {
         SemanticDreamWorker.cancelOneTime(context, assistantId, conversationId)
         val (_, hash) = current(assistantId, requireAutomatic = false) ?: return@launch
         val key = "manual:${System.currentTimeMillis()}"
-        enqueue(assistantId, hash, key, 0, manual = true, dispatch = false, conversationId = conversationId)
+        enqueue(assistantId, hash, key, 0, manual = true, dispatch = false, conversationId = conversationId, range = range)
         SemanticDreamWorker.schedule(context, assistantId, hash, 0, manual = true, conversationId = conversationId)
     }
 
@@ -147,7 +147,8 @@ class SemanticDreamScheduler(
         put(state.copy(status = "running"))
         val hold = keepAlive.acquire()
         try {
-            val result = manager.runAssistant(assistantId, automatic = !manual, conversationId = conversationId)
+            val result = if (state.manualRange != null) manager.runRange(assistantId, checkNotNull(conversationId), state.manualRange)
+                else manager.runAssistant(assistantId, automatic = !manual, conversationId = conversationId)
             return repository.database.withTransaction {
                 val latest = load(assistantId, conversationId) ?: return@withTransaction "cancelled"
                 if (latest.configurationHash != hash || latest.status == "cancelled") return@withTransaction "cancelled"
@@ -175,15 +176,18 @@ class SemanticDreamScheduler(
     }
 
     private suspend fun enqueue(assistantId: String, hash: String, turnKey: String, delayMillis: Long,
-        manual: Boolean = false, dispatch: Boolean = true, conversationId: String? = null) {
+        manual: Boolean = false, dispatch: Boolean = true, conversationId: String? = null, range: SemanticDreamRange? = null) {
         repository.database.withTransaction {
             if (current(assistantId, requireAutomatic = false)?.second != hash) return@withTransaction
             val old = load(assistantId, conversationId)
+            // 新聊天触发不能替换尚未完成的手动范围及其固定终点。
+            if (!manual && old?.manualRange != null && old.status in setOf("pending", "running") &&
+                old.configurationHash == hash) return@withTransaction
             val proposed = old?.rescheduled(hash, turnKey, System.currentTimeMillis(), delayMillis, manual)
                 ?: SemanticDreamScheduleState(assistantId, hash, turnKey, System.currentTimeMillis() + delayMillis,
                     conversationId = conversationId)
             val next = if (old?.status == "running" && old.configurationHash == hash && !manual)
-                proposed.copy(status = "running") else proposed
+                proposed.copy(status = "running") else proposed.copy(manualRange = range)
             put(next)
             if (dispatch && next.status == "pending") SemanticDreamWorker.schedule(context, assistantId, hash,
                 next.dueAt - System.currentTimeMillis(), conversationId = conversationId)

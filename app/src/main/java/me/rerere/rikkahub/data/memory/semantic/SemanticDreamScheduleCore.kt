@@ -14,11 +14,12 @@ data class SemanticDreamScheduleState(
     val lastCompletedAt: Long = 0,
     val error: String? = null,
     val conversationId: String? = null,
+    val manualRange: SemanticDreamRange? = null,
 ) {
     fun rescheduled(hash: String, newTurnKey: String, now: Long, delayMillis: Long, manual: Boolean = false): SemanticDreamScheduleState {
         if (!manual && hash == configurationHash && newTurnKey == turnKey) return this
         return copy(configurationHash = hash, turnKey = newTurnKey, dueAt = now + delayMillis.coerceAtLeast(0),
-            attempts = 0, status = "pending", error = null)
+            attempts = 0, status = "pending", error = null, manualRange = null)
     }
 
     fun afterRun(runStatus: String, now: Long, config: SemanticDreamSettings, failure: String?): SemanticDreamScheduleState = when (runStatus) {

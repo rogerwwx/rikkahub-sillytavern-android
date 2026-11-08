@@ -14,6 +14,15 @@ object SemanticDreamCoreSmoke {
         check(later.evidence.map { it.messageId } == listOf("u2", "a2"))
         val completedEarlier = dreamWindow("c", turns, later.nextCursor, 1000, 0)!!
         check(completedEarlier.evidence.first().messageId == "u1")
+        check(dreamWindow("c", turns, completedEarlier.nextCursor, 1000, 0) == null) {
+            "补齐较早轮次后不能丢掉已经成功处理的后续轮次"
+        }
+        val selected = dreamWindow("c", turns, DreamCursor(), 1000, 0, firstPosition = 2, lastPosition = 3)!!
+        check(selected.evidence.map { it.messageId } == listOf("u2", "a2"))
+        val history = dreamHistory(turns, selected.nextCursor)
+        check(history.completedTurns == 2 && history.processedTurns == 1 && history.pendingTurns == 1)
+        check(history.messages.map { it.processed } == listOf(false, false, true, true))
+        check(dreamWindow("c", turns, DreamCursor(), 1000, 0, firstPosition = 1, lastPosition = 2) == null)
         check(!validDreamSources(window.evidence, turns.map { if (it.messageId == "u1") it.copy(text = "改了") else it }))
         check(validDreamSources(window.evidence, turns + message("u3", "user", "新增")))
         val localTime = turns.map { it.copy(createdAtText = "2026-11-07T10:00:00") }

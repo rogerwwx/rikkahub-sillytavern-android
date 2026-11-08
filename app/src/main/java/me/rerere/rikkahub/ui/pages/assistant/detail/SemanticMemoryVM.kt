@@ -49,6 +49,7 @@ class SemanticMemoryVM(
     val recallResult = MutableStateFlow<SemanticRecallResult?>(null)
     val dreamRuns = MutableStateFlow<List<SemanticDreamRunState>>(emptyList())
     val dreamSchedule = MutableStateFlow<SemanticDreamScheduleState?>(null)
+    val dreamHistory = MutableStateFlow<SemanticDreamHistory?>(null)
     val sourcePreview = MutableStateFlow<String?>(null)
     private var importRunner: Job? = null
 
@@ -129,6 +130,15 @@ class SemanticMemoryVM(
     fun dream() = action {
         me.rerere.rikkahub.data.service.SemanticDreamWorker.scheduleManual(context, assistantId, conversationId)
         message.value = "本窗口已排入后台做梦队列，离开页面后仍可继续；实际执行时间由 Android 调度"
+        refreshDiagnostics()
+    }
+
+    fun dreamAll() = dreamRange()
+
+    fun dreamRange(startMessageId: String? = null, endMessageId: String? = null) = action {
+        val range = dreamManager.selectRange(assistantId, conversationId, startMessageId, endMessageId)
+        dreamScheduler.manual(assistantId, conversationId, range)
+        message.value = "所选历史已排入后台做梦队列，将按完整轮次持续处理到固定终点"
         refreshDiagnostics()
     }
 
@@ -225,6 +235,7 @@ class SemanticMemoryVM(
         imports.value = transfers.jobs(assistantId, conversationId)
         dreamRuns.value = dreamManager.runs(assistantId, conversationId)
         dreamSchedule.value = dreamScheduler.load(assistantId, conversationId)
+        dreamHistory.value = dreamManager.history(assistantId, conversationId)
         val items = repository.list(assistantId, conversationId)
         val config = repository.assistantSettings(assistantId)
         val base = config?.let { fingerprintOrNull(it) }
