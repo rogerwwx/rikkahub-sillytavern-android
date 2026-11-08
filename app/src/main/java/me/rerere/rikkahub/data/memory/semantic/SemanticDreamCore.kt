@@ -229,7 +229,7 @@ fun dreamWindow(
     }
     val context = (contextTurns + partial.takeIf { it.isNotBlank() }.orEmpty()).filter { it.isNotBlank() }.joinToString("\n")
     val transcript = evidence.joinToString("\n") { source ->
-        "[新证据 id=${source.evidenceId} role=${source.role} date=${source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)} offset=${source.start}:${source.end}]\n" +
+        "[新证据 id=${source.evidenceId} role=${source.role} messageDate=${source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)} offset=${source.start}:${source.end}]\n" +
             messages[source.position].text.substring(source.start, source.end)
     }
     return DreamWindow(evidence, context, transcript, mergeDreamCoverage(messages, stableCursor, evidence), completed)

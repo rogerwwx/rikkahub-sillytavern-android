@@ -267,8 +267,9 @@ class SemanticDreamManager(
 
     private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor, config: SemanticMemorySettings,
         positions: IntRange = 0..messages.lastIndex): DreamWindow? {
-        // 为提示词、旧事实、来源标签和重叠轮次预留预算；汉字按至少一个 token 保守计算。
-        val budget = (config.dream.maxInputTokens - 1800).coerceAtLeast(512) / 2
+        // 提示词与衔接状态先占预算，余量分给新证据、重叠原文和旧事实；汉字按至少一个 token 保守计算。
+        val reserved = maxOf(1800, config.dream.reflectionSystemPrompt().length + 200) + cursor.continuity.length
+        val budget = (config.dream.maxInputTokens - reserved).coerceAtLeast(512) / 2
         return dreamWindow(id, messages, cursor, budget, config.dream.overlapTurns,
             config.dream.segmentGapMinutes, config.dream.splitByDay, messageOverhead = 180,
             firstPosition = positions.first, lastPosition = positions.last)
@@ -313,13 +314,14 @@ class SemanticDreamManager(
             val recalled = if (query.isNotBlank()) repository.recall(assistantId, conversationId, query, config).hits.map { it.memory } else emptyList()
             val core = repository.list(assistantId, conversationId).filter { it.isCore && it.status == "active" }.take(config.coreBudget)
             val candidates = (recalled + core).distinctBy { it.id }
+            val systemPrompt = config.dream.reflectionSystemPrompt()
+            val reserved = maxOf(1800, systemPrompt.length + 200) + window.nextCursor.continuity.length
             val oldContext = candidates.joinToString("\n") {
                 val evidence = dreamSources(it).filter { source -> source.valid }.maxByOrNull { source -> source.createdAt }
                 "[旧事实 id=${it.id} version=${it.contentVersion} scope=${dreamMetadata(it)["scope"] ?: "unknown"} latestEvidence=${evidence?.createdAtText ?: evidence?.createdAt ?: "unknown"}] ${it.content}"
             }
-                .take((config.dream.maxInputTokens - 1800).coerceAtLeast(0) / 4)
-            val input = "[衔接理解材料]\n${window.nextCursor.continuity}\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n${window.transcript}"
-            val systemPrompt = config.dream.reflectionSystemPrompt()
+                .take((config.dream.maxInputTokens - reserved).coerceAtLeast(0) / 4)
+            val input = "[上一片衔接状态，仅用于理解]\n${window.nextCursor.continuity}\n[重叠原文，仅用于理解]\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n${window.transcript}"
             require(systemPrompt.length + input.length <= config.dream.maxInputTokens) { "当前输入预算不足以容纳提示、来源和完整材料，请缩短提示词或提高做梦输入预算" }
             val params = TextGenerationParams(model = model, temperature = config.dream.temperature.toFloat(),
                 reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
