@@ -199,7 +199,8 @@ class SemanticDreamScheduler(
     }
 
     private suspend fun accelerate(state: SemanticDreamScheduleState) {
-        if (state.status != "pending" || state.attempts > 0) return
+        // 已到期的任务无需重排；REPLACE 会取消刚开始运行的手动任务。
+        if (state.status != "pending" || state.attempts > 0 || state.dueAt <= System.currentTimeMillis()) return
         val (_, hash) = current(state.assistantId) ?: return
         if (state.configurationHash != hash) return
         val accelerated = repository.database.withTransaction {
