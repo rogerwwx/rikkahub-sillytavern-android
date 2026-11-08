@@ -138,7 +138,7 @@ class SemanticMemoryVM(
     fun dreamRange(startMessageId: String? = null, endMessageId: String? = null) = action {
         val range = dreamManager.selectRange(assistantId, conversationId, startMessageId, endMessageId)
         dreamScheduler.manual(assistantId, conversationId, range)
-        message.value = "所选历史已排入后台做梦队列，将按完整轮次持续处理到固定终点"
+        message.value = "所选原文已排入后台做梦队列，将按顺序分片处理到固定终点"
         refreshDiagnostics()
     }
 

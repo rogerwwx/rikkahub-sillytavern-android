@@ -45,6 +45,39 @@ object SemanticDreamCoreSmoke {
         check(dreamExpiry("factual", true, now, mapOf("factual" to 180)) == null)
         check(parseDreamDraft("```json\n{\"changes\":[]}\n```").changes.isEmpty())
         check(runCatching { parseDreamDraft("{\"changes\":[") }.isFailure)
+        val manualHistory = listOf(message("opening", "assistant", "故事从京都车站开始"),
+            message("mu1", "user", "牵住你的手"), message("ma1", "assistant", "一起走进旅馆", finished = false),
+            message("mu2", "user", "次日清晨"), message("ma2", "assistant", "一起吃早餐"),
+            message("tail", "user", "先拿好行李"))
+        check(dreamHistory(manualHistory, DreamCursor()).messages.map { it.messageId } ==
+            manualHistory.map { it.messageId }) { "范围历史不能因助手状态过滤掉相邻用户、开场或尾消息" }
+        val manual = dreamWindow("manual", manualHistory, DreamCursor(), 1000, 0, includeIncomplete = true)!!
+        check(manual.evidence.map { it.messageId } == manualHistory.map { it.messageId })
+        check(manual.evidence.filter { it.isIncomplete }.map { it.messageId } == listOf("ma1"))
+        check(validDreamSources(manual.evidence, manualHistory))
+        check(dreamWindow("manual", manualHistory, manual.nextCursor, 1000, 0, includeIncomplete = true) == null) {
+            "手动不完整来源必须能推进并保留游标，不能每批反复发送同一片"
+        }
+        check(!validDreamSources(manual.evidence, manualHistory.map {
+            if (it.messageId == "ma1") it.copy(text = "后来改成不同剧情") else it
+        }))
+        check(dreamWindow("manual", manualHistory, DreamCursor(), 1000, 0)!!.evidence.map { it.messageId } ==
+            listOf("mu2", "ma2")) { "自动处理仍只消费完整轮次" }
+        val assistantOnly = dreamWindow("manual", manualHistory, DreamCursor(), 1000, 0,
+            firstPosition = 2, lastPosition = 2, includeIncomplete = true)!!
+        check(assistantOnly.evidence.single().messageId == "ma1") { "手动起止范围应精确截取原文，不能被轮次边界吞掉" }
+        check(SemanticDreamRange("single", "ma1", "ma1").positions(manualHistory) == 2..2)
+        var manualCursor = DreamCursor()
+        val consumedManual = mutableMapOf<String, Int>()
+        var slices = 0
+        while (true) {
+            val part = dreamWindow("manual", manualHistory, manualCursor, 9, 0, includeIncomplete = true) ?: break
+            part.evidence.forEach { consumedManual[it.messageId] = consumedManual.getOrDefault(it.messageId, 0) + it.end - it.start }
+            manualCursor = part.nextCursor
+            check(++slices < 30)
+        }
+        check(manualHistory.all { consumedManual[it.messageId] == it.text.length }) { "手动原文切片丢字或重复发送" }
+        check(dreamHistory(manualHistory, manualCursor).messages.all { it.processed })
         println("SemanticDreamCoreSmoke passed")
     }
 }

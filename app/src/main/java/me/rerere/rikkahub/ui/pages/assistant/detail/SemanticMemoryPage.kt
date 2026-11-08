@@ -269,12 +269,13 @@ private fun SemanticDreamPanel(
     var choosingStart by remember { mutableStateOf<Boolean?>(null) }
     val messages = history?.messages.orEmpty()
     LaunchedEffect(messages) {
-        if (messages.none { it.messageId == startId }) startId = messages.firstOrNull { it.role == "user" }?.messageId
-        if (messages.none { it.messageId == endId }) endId = messages.lastOrNull { it.role == "assistant" }?.messageId
+        if (messages.none { it.messageId == startId }) startId = messages.firstOrNull()?.messageId
+        if (messages.none { it.messageId == endId }) endId = messages.lastOrNull()?.messageId
     }
     val start = messages.firstOrNull { it.messageId == startId }
     val end = messages.firstOrNull { it.messageId == endId }
-    val validRange = start != null && end != null && start.position < end.position
+    val validRange = start != null && end != null && start.position <= end.position
+    val processedMessages = messages.count { it.processed }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -285,20 +286,20 @@ private fun SemanticDreamPanel(
             } else {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Column {
-                        Text("${history.processedTurns}", style = MaterialTheme.typography.headlineSmall)
-                        Text("已处理轮次", style = MaterialTheme.typography.bodySmall)
+                        Text("$processedMessages", style = MaterialTheme.typography.headlineSmall)
+                        Text("已处理消息", style = MaterialTheme.typography.bodySmall)
                     }
                     Column {
-                        Text("${history.pendingTurns}", style = MaterialTheme.typography.headlineSmall)
-                        Text("待处理轮次", style = MaterialTheme.typography.bodySmall)
+                        Text("${messages.size - processedMessages}", style = MaterialTheme.typography.headlineSmall)
+                        Text("待处理消息", style = MaterialTheme.typography.bodySmall)
                     }
                     Column {
-                        Text("${history.completedTurns}", style = MaterialTheme.typography.headlineSmall)
-                        Text("完整轮次", style = MaterialTheme.typography.bodySmall)
+                        Text("${messages.size}", style = MaterialTheme.typography.headlineSmall)
+                        Text("原文消息", style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                if (history.completedTurns > 0) LinearProgressIndicator(
-                    progress = { history.processedTurns.toFloat() / history.completedTurns },
+                if (messages.isNotEmpty()) LinearProgressIndicator(
+                    progress = { processedMessages.toFloat() / messages.size },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text("成功处理 ${history.successfulRuns} 次。标记只在完整结果通过来源核验后保存，提取结果为空也算已处理。",
@@ -316,15 +317,15 @@ private fun SemanticDreamPanel(
                 }
             }
             Text(when (mode) {
-                0 -> "从最早未处理的完整轮次继续，包含压缩隐藏的原文。"
-                1 -> "重新梳理当前窗口的全部完整历史，后台按片段持续处理到所选终点。"
-                else -> "选择起止消息，按完整轮次总结这段历史；已处理的区间也可以重新梳理。"
+                0 -> "从最早未处理的完整轮次继续，包含压缩隐藏的原文。要包含开场、截断回复或独立消息，请选择全部历史或指定范围。"
+                1 -> "重新梳理当前窗口的全部原文，包含当前选中的编辑正文、开场和截断回复，后台按顺序分片处理。"
+                else -> "选择原文起止消息，包含区间内双方的全部正文；已处理的区间也可以重新梳理。"
             }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (mode == 2) {
                 OutlinedButton(onClick = { choosingStart = true }, enabled = messages.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth()) {
-                        Text("起点 · ${start?.let { "第 ${it.position + 1} 条 · 用户" } ?: "选择消息"}")
+                        Text("起点 · ${start?.let { "第 ${it.position + 1} 条 · ${if (it.role == "user") "用户" else "助手"}" } ?: "选择消息"}")
                         start?.let { Text(it.text, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall) }
                     }
@@ -332,12 +333,12 @@ private fun SemanticDreamPanel(
                 OutlinedButton(onClick = { choosingStart = false }, enabled = messages.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth()) {
-                        Text("终点 · ${end?.let { "第 ${it.position + 1} 条 · 助手" } ?: "选择消息"}")
+                        Text("终点 · ${end?.let { "第 ${it.position + 1} 条 · ${if (it.role == "user") "用户" else "助手"}" } ?: "选择消息"}")
                         end?.let { Text(it.text, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall) }
                     }
                 }
-                if (!validRange && messages.isNotEmpty()) Text("请将起点设为终点之前的用户消息。",
+                if (!validRange && messages.isNotEmpty()) Text("请将起点设为终点之前的消息，也可以选择单条消息。",
                     color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -390,20 +391,21 @@ private fun SemanticDreamPanel(
     choosingStart?.let { pickStart ->
         AlertDialog(
             onDismissRequest = { choosingStart = null },
-            title = { Text(if (pickStart) "选择起始用户消息" else "选择结束助手消息") },
+            title = { Text(if (pickStart) "选择起始消息" else "选择结束消息") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(messages.filter { it.role == if (pickStart) "user" else "assistant" },
-                        key = { it.messageId }) { message ->
+                    items(messages, key = { it.messageId }) { message ->
                         OutlinedCard(onClick = {
                             if (pickStart) startId = message.messageId else endId = message.messageId
                             choosingStart = null
                         }) {
                             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("第 ${message.position + 1} 条 · ${if (message.processed) "已处理" else "待处理"}",
+                                Text("第 ${message.position + 1} 条 · ${if (message.role == "user") "用户" else "助手"} · ${if (message.processed) "已处理" else "待处理"}",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.primary)
                                 Text(message.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                if (!message.finished) Text("未确认正常完成，将仅总结已有正文",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text(relativeTime(message.createdAt), style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }

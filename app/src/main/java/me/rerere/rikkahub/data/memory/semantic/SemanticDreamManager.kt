@@ -131,10 +131,9 @@ class SemanticDreamManager(
         endMessageId: String? = null): SemanticDreamRange {
         val messages = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId }?.messages
             ?: error("当前对话已删除或移出助手")
-        val complete = dreamCompleteTurns(messages).flatten()
-        require(complete.isNotEmpty()) { "当前窗口还没有可总结的完整轮次" }
-        return SemanticDreamRange(Uuid.random().toString(), startMessageId ?: complete.first().value.messageId,
-            endMessageId ?: complete.last().value.messageId).also { it.positions(messages) }
+        require(messages.isNotEmpty()) { "当前窗口还没有可总结的原文" }
+        return SemanticDreamRange(Uuid.random().toString(), startMessageId ?: messages.first().messageId,
+            endMessageId ?: messages.last().messageId).also { it.positions(messages) }
     }
 
     suspend fun pendingAssistants(): List<String> = settingsStore.awaitLoaded().assistants
@@ -222,7 +221,7 @@ class SemanticDreamManager(
                 ?: error("当前对话已删除或移出助手")
             val positions = range.positions(snapshot.messages)
             val remaining = window(conversationId, snapshot.messages, cursor(assistantId, conversationId, range.id),
-                settings, positions) != null
+                settings, positions, includeIncomplete = true) != null
             SemanticDreamRun(if (remaining) "pending" else "completed", segments, changed)
         }
 
@@ -266,13 +265,13 @@ class SemanticDreamManager(
     }
 
     private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor, config: SemanticMemorySettings,
-        positions: IntRange = 0..messages.lastIndex): DreamWindow? {
+        positions: IntRange = 0..messages.lastIndex, includeIncomplete: Boolean = false): DreamWindow? {
         // 提示词与衔接状态先占预算，余量分给新证据、重叠原文和旧事实；汉字按至少一个 token 保守计算。
         val reserved = maxOf(1800, config.dream.reflectionSystemPrompt().length + 200) + cursor.continuity.length
         val budget = (config.dream.maxInputTokens - reserved).coerceAtLeast(512) / 2
         return dreamWindow(id, messages, cursor, budget, config.dream.overlapTurns,
             config.dream.segmentGapMinutes, config.dream.splitByDay, messageOverhead = 180,
-            firstPosition = positions.first, lastPosition = positions.last)
+            firstPosition = positions.first, lastPosition = positions.last, includeIncomplete = includeIncomplete)
     }
 
     private suspend fun process(assistantId: String, conversationId: String, automatic: Boolean,
@@ -284,7 +283,8 @@ class SemanticDreamManager(
         val oldCursor = cursor(assistantId, conversationId)
         val progressCursor = if (range == null) oldCursor else cursor(assistantId, conversationId, range.id)
         val positions = range?.positions(snapshot.messages) ?: (0..snapshot.messages.lastIndex)
-        val window = window(conversationId, snapshot.messages, progressCursor, config, positions) ?: return null
+        val window = window(conversationId, snapshot.messages, progressCursor, config, positions,
+            includeIncomplete = range != null) ?: return null
         val modelSettings = settingsStore.awaitLoaded()
         val stream = modelSettings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
             ?: error("助手已删除")
@@ -650,7 +650,7 @@ internal fun Conversation.dreamMessages(): List<DreamMessage> = messageNodes.map
     DreamMessage(node.id.toString(), message.id.toString(), message.role.name.lowercase(),
         text.ifBlank { "（非文本消息，没有可用事实正文）" },
         message.createdAt.toInstant(TimeZone.currentSystemDefault()).toEpochMilliseconds(),
-        message.role == MessageRole.USER || (message.finishedAt != null && message.getTools().all { it.isExecuted } &&
-            (message.generationCompletion == null || message.generationCompletion == StreamCompletion.NORMAL)),
+        message.role == MessageRole.USER || (message.getTools().all { it.isExecuted } &&
+            (message.generationCompletion == null || (message.finishedAt != null && message.generationCompletion == StreamCompletion.NORMAL))),
         createdAtText = message.createdAt.toString())
 }
