@@ -3036,6 +3036,7 @@ class ChatService(
                     // 编辑的是原消息的内容，来源仍是生成它的模型
                     modelId = original.modelId,
                     modelSnapshot = original.modelSnapshot,
+                    isContextHidden = original.isContextHidden,
                 ),
                 selectIndex = node.messages.size
             )

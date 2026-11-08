@@ -155,11 +155,11 @@ fun CompressContextDialog(
                         maxLines = 4,
                     )
 
-                    // 压缩会删掉被摘要覆盖的历史，破坏性操作要提前说明
+                    // 原文保留在聊天窗口，后续请求使用摘要与保留消息。
                     Text(
                         text = stringResource(R.string.chat_page_compress_warning),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

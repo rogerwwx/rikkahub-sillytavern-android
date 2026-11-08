@@ -98,6 +98,7 @@
 
   var state = {
     messages: [],
+    compressedBeforeMessageId: '',
     placeholder: '',
     macros: {},
     libs: {},
@@ -1973,8 +1974,24 @@
       if (!old.dataset || old.dataset.id === undefined) continue;
       if (kept.indexOf(old) < 0) list.removeChild(old);
     }
+    var divider = list.querySelector('.context-compressed-divider');
+    var boundaryId = state.compressedBeforeMessageId;
+    if (boundaryId && rows.some(function (row) { return row.dataset.id === boundaryId; })) {
+      if (!divider) {
+        divider = document.createElement('div');
+        divider.className = 'context-compressed-divider';
+        divider.setAttribute('role', 'separator');
+        divider.textContent = '上下文已压缩';
+      }
+    } else {
+      if (divider) list.removeChild(divider);
+      divider = null;
+    }
     // 按新顺序重排：appendChild 对已在树上的节点是「移动」而不是重建
-    rows.forEach(function (row) { list.appendChild(row); });
+    rows.forEach(function (row) {
+      if (divider && row.dataset.id === boundaryId) list.appendChild(divider);
+      list.appendChild(row);
+    });
   }
 
   // 外观变化后按新设置重刷所有行（不动卡片 iframe）
@@ -2931,6 +2948,7 @@
       if (typeof payload.placeholder === 'string') state.placeholder = payload.placeholder;
       if (payload.labels) state.labels = payload.labels;
       state.messages = payload.messages || [];
+      state.compressedBeforeMessageId = payload.compressedBeforeMessageId || '';
       // 原生没报生成中就不再是流式：指示必须收干净，不做残留下次生成
       if (payload.generating != null) generating = payload.generating === true;
       if (!generating || (streamId && !messageById(streamId))) streamId = null;

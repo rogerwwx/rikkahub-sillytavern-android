@@ -56,6 +56,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -130,7 +131,7 @@ private const val TAG = "ChatList"
 private const val LoadingIndicatorKey = "LoadingIndicator"
 private const val ScrollBottomKey = "ScrollBottomKey"
 
-/** 最后一个压缩检查点之前（含检查点）的消息数量，0 表示未压缩。 */
+/** 最后一个压缩检查点之前的消息数量，0 表示没有压缩前缀。 */
 internal fun List<MessageNode>.compressedPrefixSize(): Int =
     indexOfLast { it.currentMessage.isContextCheckpoint }.coerceAtLeast(0)
 
@@ -495,14 +496,9 @@ private fun ChatListNormal(
             .associateBy { it.id }
     }
     val lastMessageIndex = conversation.messageNodes.lastIndex
-    // 压缩后只渲染最后一个检查点及其后的消息，旧记录由摘要替代
-    val hiddenPrefixCount = remember(conversation.messageNodes) {
+    // 压缩原文仍可翻阅；此边界只用于展示分隔行，不改变请求上下文。
+    val compressedPrefixCount = remember(conversation.messageNodes) {
         conversation.messageNodes.compressedPrefixSize()
-    }
-    val visibleNodes = if (hiddenPrefixCount > 0) {
-        conversation.messageNodes.drop(hiddenPrefixCount)
-    } else {
-        conversation.messageNodes
     }
 
     Box(
@@ -565,11 +561,13 @@ private fun ChatListNormal(
                     .hazeSource(state = hazeState),
             ) {
             itemsIndexed(
-                items = visibleNodes,
+                items = conversation.messageNodes,
                 key = { index, item -> item.id },
-            ) { visibleIndex, node ->
-                val index = hiddenPrefixCount + visibleIndex
+            ) { index, node ->
                 Column {
+                    if (compressedPrefixCount > 0 && index == compressedPrefixCount) {
+                        CompressedContextDivider()
+                    }
                     ListSelectableItem(
                         key = node.id,
                         onSelectChange = { toggleSelected(node.id) },
@@ -918,6 +916,23 @@ private fun buildHighlightedText(
 }
 
 @Composable
+private fun CompressedContextDivider() {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant)
+        Text(
+            "上下文已压缩",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant)
+    }
+}
+
+@Composable
 internal fun ChatListPreview(
     innerPadding: PaddingValues,
     conversation: Conversation,
@@ -927,12 +942,11 @@ internal fun ChatListPreview(
 ) {
     var searchQuery by remember { mutableStateOf("") }
 
-    // 只列出压缩检查点之后的可见消息，index 与列表位置保持一致
-    val visibleNodes = remember(conversation.messageNodes) {
-        conversation.messageNodes.drop(conversation.messageNodes.compressedPrefixSize())
+    val compressedPrefixCount = remember(conversation.messageNodes) {
+        conversation.messageNodes.compressedPrefixSize()
     }
-    val filteredMessages = remember(visibleNodes, searchQuery) {
-        visibleNodes.mapIndexed { index, node -> index to node }
+    val filteredMessages = remember(conversation.messageNodes, searchQuery) {
+        conversation.messageNodes.mapIndexed { index, node -> index to node }
             .filter { (_, node) ->
                 searchQuery.isBlank() || node.currentMessage.toText().contains(searchQuery, ignoreCase = true)
             }
@@ -997,6 +1011,9 @@ internal fun ChatListPreview(
                         ),
                     horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
                 ) {
+                    if (compressedPrefixCount > 0 && originalIndex == compressedPrefixCount) {
+                        CompressedContextDivider()
+                    }
                     Surface(
                         shape = MaterialTheme.shapes.medium,
                         color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,

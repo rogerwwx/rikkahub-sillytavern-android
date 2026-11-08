@@ -112,6 +112,14 @@
 
   /* —— 消息行：原生是 Column(fillMaxWidth) + spacedBy(4dp)，头行与内容块上下堆叠 —— */
   .row { display: flex; flex-direction: column; gap: var(--row-gap); width: 100%; margin-bottom: var(--row-bottom); }
+  .context-compressed-divider {
+    display: flex; align-items: center; gap: 12px;
+    margin: 12px 0 24px;
+    color: var(--md-on-surface-variant); font-size: 12px; line-height: 16px;
+  }
+  .context-compressed-divider::before, .context-compressed-divider::after {
+    content: ''; flex: 1; height: 1px; background: var(--md-outline-variant);
+  }
   /* 新消息入场：对齐原生 AnimatedVisibility 的上滑淡入 */
   .row.enter { animation: rowIn .22s cubic-bezier(.2, 0, 0, 1); }
   @keyframes rowIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

@@ -262,7 +262,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     chatListState.scrollToItem(index)
                 }
             } else {
-                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                chatListState.requestScrollToItem(conversation.messageNodes.size + 5)
             }
             vm.chatListInitialized = true
         }
@@ -491,7 +491,7 @@ private fun ChatPageContent(
         frontendScriptsJson = if (frontendCardPreferredNow) pluginManager.buildFrontendScriptsJson() else "[]"
     }
     // WebView 里点消息 → 用原生对话框做操作，功能与原生列表一致
-    var webActionIndex by remember { mutableStateOf<Int?>(null) }
+    var webActionMessageId by remember { mutableStateOf<Uuid?>(null) }
     var webCopyMessage by remember { mutableStateOf<UIMessage?>(null) }
     // 页面里的图片点击：交给原生全屏预览器
     var webPreviewImage by remember { mutableStateOf<String?>(null) }
@@ -509,15 +509,15 @@ private fun ChatPageContent(
     var webScrollToMessageId by remember { mutableStateOf<String?>(null) }
 
     // WebView 模式下的展示用消息：与原生渲染同一套展示层转换（消息正则
-    var displayMessages by remember { mutableStateOf(conversation.currentMessages) }
-    LaunchedEffect(conversation.currentMessages, frontendCardPreferredNow, loadingJob != null) {
+    var displayMessages by remember { mutableStateOf(conversation.messageNodes.map { it.currentMessage }) }
+    LaunchedEffect(conversation.messageNodes, frontendCardPreferredNow, loadingJob != null) {
         // 先立刻把原始消息交给页面：展示层转换是挂起操作，等它跑完再显示会让
-        displayMessages = conversation.currentMessages
+        displayMessages = conversation.messageNodes.map { it.currentMessage }
         displayMessages = if (!frontendCardPreferredNow) {
-            conversation.currentMessages
+            conversation.messageNodes.map { it.currentMessage }
         } else {
             runCatching {
-                conversation.currentMessages.visualTransforms(
+                conversation.messageNodes.map { it.currentMessage }.visualTransforms(
                     transformers = listOf(
                         me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer,
                         me.rerere.rikkahub.data.ai.transformers.OutputTagCleanupTransformer,
@@ -531,29 +531,26 @@ private fun ChatPageContent(
                     settings = setting,
                     conversationId = conversation.id,
                 )
-            }.getOrDefault(conversation.currentMessages)
+            }.getOrDefault(conversation.messageNodes.map { it.currentMessage })
         }
     }
 
-    // 压缩后页面只展示检查点及其后的消息，旧记录由摘要替代
-    val webHiddenPrefixCount = remember(conversation.messageNodes) {
-        conversation.messageNodes.compressedPrefixSize()
+    // 展示和脚本操作使用完整原文；模型请求仍由 currentMessages 排除压缩隐藏内容。
+    val webVisibleNodes = remember(conversation.messageNodes) {
+        conversation.messageNodes
     }
-    val webVisibleNodes = remember(conversation.messageNodes, webHiddenPrefixCount) {
-        conversation.messageNodes.drop(webHiddenPrefixCount)
+    val webVisibleMessages = remember(displayMessages) {
+        displayMessages
     }
-    val webVisibleMessages = remember(displayMessages, webHiddenPrefixCount) {
-        displayMessages.drop(webHiddenPrefixCount.coerceAtMost(displayMessages.size))
-    }
-    val webRawVisibleMessages = remember(conversation.currentMessages, webHiddenPrefixCount) {
-        conversation.currentMessages.drop(webHiddenPrefixCount)
+    val webRawVisibleMessages = remember(conversation.messageNodes) {
+        conversation.messageNodes.map { it.currentMessage }
     }
 
     // 原生事件总线：把生成与消息变化按酒馆事件名推给页面与卡片
     val webEvents = remember { MutableSharedFlow<WebUiEvent>(extraBufferCapacity = 64) }
     var lastEventKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(conversation.messageNodes, loadingJob != null) {
-        val list = conversation.currentMessages
+        val list = conversation.messageNodes.map { it.currentMessage }
         // 签名带上分支下标：重 roll 只换选中分支、条数不变，光看消息 id 分不出与编辑的区别
         val branches = conversation.messageNodes.joinToString(",") { "${it.id}:${it.selectIndex}" }
         val key = list.joinToString(",") { it.id.toString() } + "|" + branches + "|" + (loadingJob != null)
@@ -566,9 +563,8 @@ private fun ChatPageContent(
         val previouslyLoading = previous.endsWith("|true")
         val nowLoading = loadingJob != null
         val previousCount = previousIds.split(",").count { it.isNotBlank() }
-        // 事件下标与页面拿到的可见消息保持一致（压缩前的消息已隐藏）
-        val visibleStart = webHiddenPrefixCount.coerceAtMost(list.size)
-        val visibleLastIndex = list.lastIndex - visibleStart
+        // 分隔行不占消息序号，事件和完整展示列表使用同一下标。
+        val visibleLastIndex = list.lastIndex
         if (!previouslyLoading && nowLoading) {
             webEvents.tryEmit(WebUiEvent("GENERATION_STARTED", "[]"))
         }
@@ -580,7 +576,7 @@ private fun ChatPageContent(
             webEvents.tryEmit(WebUiEvent("MESSAGE_SENT", "[${visibleLastIndex}]"))
         }
         if (list.size < previousCount) {
-            webEvents.tryEmit(WebUiEvent("MESSAGE_DELETED", "[${list.size - visibleStart}]"))
+            webEvents.tryEmit(WebUiEvent("MESSAGE_DELETED", "[${list.size}]"))
         } else if (list.size == previousCount && !nowLoading && !previouslyLoading) {
             val currentIds = list.map { it.id.toString() }
             val previousIdList = previousIds.split(",")
@@ -692,7 +688,7 @@ private fun ChatPageContent(
                         barKeyboard?.hide()
                         scope.launch {
                             delay(100.milliseconds)
-                            chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                            chatListState.requestScrollToItem(conversation.messageNodes.size + 5)
                         }
                     },
                     onLongSendClick = {
@@ -879,10 +875,10 @@ private fun ChatPageContent(
                 )
             }
             // WebView 消息操作排点「更多」→ 原生那张消息操作面板，与原生列表同一入口
-            webActionIndex?.let { index ->
-                val message = conversation.currentMessages.getOrNull(index)
+            webActionMessageId?.let { messageId ->
+                val message = webRawVisibleMessages.firstOrNull { it.id == messageId }
                 if (message == null) {
-                    webActionIndex = null
+                    webActionMessageId = null
                 } else {
                     val node = conversation.messageNodes.find { node ->
                         node.messages.any { it.id == message.id }
@@ -927,7 +923,7 @@ private fun ChatPageContent(
                                 navController.navigate(Screen.WebView(contentId = contentId))
                             }
                         },
-                        onDismissRequest = { webActionIndex = null },
+                        onDismissRequest = { webActionMessageId = null },
                     )
                 }
             }
@@ -947,7 +943,7 @@ private fun ChatPageContent(
             }
             // 编辑对话框：改完写回同一条消息，走原生编辑路径
             webEditIndex?.let { index ->
-                val message = conversation.currentMessages.getOrNull(index)
+                val message = webRawVisibleMessages.getOrNull(index)
                 if (message == null) {
                     webEditIndex = null
                 } else {
@@ -1033,7 +1029,7 @@ private fun ChatPageContent(
                     // 卡片改消息：按脚下标定位到真实消息，走既有编辑/插入/删除路径，
                     onSetChatMessages = { payload ->
                         runCatching {
-                            val list = conversation.currentMessages
+                            val list = webRawVisibleMessages
                             val items = kotlinx.serialization.json.Json
                                 .parseToJsonElement(payload) as? kotlinx.serialization.json.JsonArray
                                 ?: return@runCatching
@@ -1045,7 +1041,7 @@ private fun ChatPageContent(
                                     ?: obj["message"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }
                                         ?.toString()?.trim('"')
                                     ?: return@forEach
-                                val target = list.getOrNull(index + webHiddenPrefixCount)
+                                val target = list.getOrNull(index)
                                 if (target != null && target.parts.filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>().joinToString("\n") { it.text } != text) {
                                     vm.handleMessageEdit(listOf(me.rerere.ai.ui.UIMessagePart.Text(text)), target.id)
                                 }
@@ -1079,13 +1075,13 @@ private fun ChatPageContent(
                     },
                     onDeleteChatMessages = { payload ->
                         runCatching {
-                            val list = conversation.currentMessages
+                            val list = webRawVisibleMessages
                             val ids = kotlinx.serialization.json.Json
                                 .parseToJsonElement(payload) as? kotlinx.serialization.json.JsonArray
                                 ?: return@runCatching
                             ids.forEach { element ->
                                 val index = element.toString().trim('"').toIntOrNull() ?: return@forEach
-                                list.getOrNull(index + webHiddenPrefixCount)?.let { vm.deleteMessage(it) }
+                                list.getOrNull(index)?.let { vm.deleteMessage(it) }
                             }
                         }
                     },
@@ -1512,13 +1508,13 @@ private fun ChatPageContent(
                                 as? kotlinx.serialization.json.JsonObject
                             val action = obj?.get("action")?.toString()?.trim('"').orEmpty()
                             val id = obj?.get("id")?.toString()?.trim('"').orEmpty()
-                            val message = conversation.currentMessages.firstOrNull { it.id.toString() == id }
+                            val message = webRawVisibleMessages.firstOrNull { it.id.toString() == id }
                             if (message != null && action.isEmpty()) {
                                 // 只给 id：打开原生菜单（复制、编辑、翻译、重试等）
-                                webActionIndex = conversation.currentMessages.indexOf(message)
+                                webActionMessageId = message.id
                             } else if (message != null) {
                                 if (action == "menu" || action !in WEB_ACTIONS) {
-                                    webActionIndex = conversation.currentMessages.indexOf(message)
+                                    webActionMessageId = message.id
                                     return@runCatching
                                 }
                                 when (action) {
@@ -1593,7 +1589,7 @@ private fun ChatPageContent(
                                         put("role", JsonPrimitive(roleName))
                                         put("is_user", JsonPrimitive(message.role == MessageRole.USER))
                                         put("is_system", JsonPrimitive(message.role == MessageRole.SYSTEM))
-                                        put("is_hidden", JsonPrimitive(false))
+                                        put("is_hidden", JsonPrimitive(message.isContextHidden))
                                         put("extra", kotlinx.serialization.json.buildJsonObject { })
                                         val text = message.parts
                                             .filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>()

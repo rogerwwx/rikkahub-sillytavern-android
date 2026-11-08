@@ -175,6 +175,11 @@ internal fun buildState(
     // 生成中与否由原生权威下发：页面据此开关流式指示，不再靠消息内容自己猜
     generating: Boolean = false,
 ): JsonObject = buildJsonObject {
+    val compressedIndex = nodes.indexOfLast { it.currentMessage.isContextCheckpoint }
+    put(
+        "compressedBeforeMessageId",
+        if (compressedIndex > 0) nodes[compressedIndex].currentMessage.id.toString() else "",
+    )
     put(
         "messages",
         buildJsonArray {
