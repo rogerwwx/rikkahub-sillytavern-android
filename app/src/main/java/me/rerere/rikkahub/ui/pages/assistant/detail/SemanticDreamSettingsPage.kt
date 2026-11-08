@@ -10,13 +10,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.ModelType
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.memory.semantic.DEFAULT_SEMANTIC_CONSOLIDATION_PROMPT
 import me.rerere.rikkahub.data.memory.semantic.DEFAULT_SEMANTIC_REFLECTION_PROMPT
 import me.rerere.rikkahub.data.memory.semantic.SemanticDreamSettings
+import me.rerere.rikkahub.data.model.InjectionPosition
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.components.nav.BackButton
+import me.rerere.rikkahub.ui.pages.extensions.InjectionPositionSelector
+import me.rerere.rikkahub.ui.pages.extensions.InjectionRoleSelector
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
 import kotlinx.serialization.json.*
@@ -86,15 +90,8 @@ fun SemanticDreamSettingsPage(id: String) {
             DreamInt("重叠完整轮数（0—10）", config.overlapTurns, 0..10) { value -> change { it.copy(overlapTurns = value) } }
             DreamInt("自动失败重试次数（0—5）", config.retryLimit, 0..5) { value -> change { it.copy(retryLimit = value) } }
             DreamInt("重试初始退避秒（10—3600）", config.retryBackoffSeconds, 10..3600) { value -> change { it.copy(retryBackoffSeconds = value) } }
-            Text("注入与归纳", style = MaterialTheme.typography.titleMedium)
-            Row { listOf("system" to "系统", "user" to "用户", "assistant" to "助手").forEach { (role, label) ->
-                FilterChip(selected = config.injectionRole == role, onClick = { change { it.copy(injectionRole = role) } }, label = { Text(label) })
-                Spacer(Modifier.width(6.dp))
-            } }
-            Text("注入身份由所选角色表达。深度与世界书/作者备注一致：0在聊天尾，1在倒数一条前；遇工具调用边界会调整到安全位置。正文不截断，预算不足跳过整条。",
-                style = MaterialTheme.typography.bodySmall)
-            DreamInt("注入深度（0—1000）", config.injectionDepth, 0..1000) { value -> change { it.copy(injectionDepth = value) } }
-            DreamInt("注入 token 预算（64—16000）", config.injectionTokenBudget, 64..16000) { value -> change { it.copy(injectionTokenBudget = value) } }
+            SemanticInjectionSettings(config, change)
+            Text("记忆归纳", style = MaterialTheme.typography.titleMedium)
             DreamInt("每几次成功做梦检查归纳（1—100）", config.consolidationEveryRuns, 1..100) { value -> change { it.copy(consolidationEveryRuns = value) } }
             DreamInt("自动归纳最少候选（2—1000）", config.consolidationMinCandidates, 2..1000) { value -> change { it.copy(consolidationMinCandidates = value) } }
             DreamSwitch("保护核心记忆免于自动到期与归纳", config.protectCore) { value -> change { it.copy(protectCore = value) } }
@@ -126,6 +123,43 @@ fun SemanticDreamSettingsPage(id: String) {
             if (events.isEmpty()) Text("尚无 Jev 辅助请求。开启后会记录原候选、保留/排除、不确定及额外耗时。")
         }
     }
+}
+
+@Composable
+internal fun SemanticInjectionSettings(
+    config: SemanticDreamSettings,
+    change: ((SemanticDreamSettings) -> SemanticDreamSettings) -> Unit,
+) {
+    Text("记忆注入位置", style = MaterialTheme.typography.titleMedium)
+    InjectionPositionSelector(config.injectionPosition) { position ->
+        change { it.copy(injectionPosition = position) }
+    }
+    if (config.injectionPosition == InjectionPosition.BEFORE_SYSTEM_PROMPT ||
+        config.injectionPosition == InjectionPosition.AFTER_SYSTEM_PROMPT) {
+        Text("并入主系统提示词，使用 system 身份。", style = MaterialTheme.typography.bodySmall)
+    } else {
+        Text("注入身份")
+        InjectionRoleSelector(MessageRole.valueOf(config.injectionRole.uppercase()), onSelect = { role ->
+            change { it.copy(injectionRole = role.name.lowercase()) }
+        })
+    }
+    when (config.injectionPosition) {
+        InjectionPosition.AT_DEPTH -> {
+            DreamInt("注入深度（0—1000）", config.injectionDepth, 0..1000) { value ->
+                change { it.copy(injectionDepth = value) }
+            }
+            Text("深度 0 在聊天末尾，1 在最后一条消息前；遇工具调用边界会调整到安全位置。",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        InjectionPosition.AUTHOR_NOTE ->
+            Text("跟随全局作者备注的位置与深度；放在主系统提示词之前时使用 system 身份。",
+                style = MaterialTheme.typography.bodySmall)
+        else -> Unit
+    }
+    DreamInt("注入 token 预算（64—16000）", config.injectionTokenBudget, 64..16000) { value ->
+        change { it.copy(injectionTokenBudget = value) }
+    }
+    Text("记忆正文不截断，预算不足跳过整条。", style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable private fun DreamPromptEditor(

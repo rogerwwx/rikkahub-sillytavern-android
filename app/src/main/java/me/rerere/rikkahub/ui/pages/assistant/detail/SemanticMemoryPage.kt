@@ -226,13 +226,16 @@ private fun MemoryFilter(value: String, choices: Map<String, String>, onChange: 
 private fun SemanticSettingsPanel(config: SemanticMemorySettings, providers: List<me.rerere.ai.provider.ProviderSetting>,
     busy: Boolean, configure: ((SemanticMemorySettings) -> SemanticMemorySettings) -> Unit, test: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("模型和召回设置由本助手的所有窗口共用，各窗口分别保存记忆。", style = MaterialTheme.typography.bodySmall)
+        Text("模型、召回和注入设置由本助手的所有窗口共用，各窗口分别保存记忆。", style = MaterialTheme.typography.bodySmall)
         Row {
             Column(Modifier.weight(1f)) {
                 Text("启用当前助手的语义记忆")
                 Text("启用后只召回当前对话窗口的语义记忆；关闭后恢复原记忆行为。", style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = config.enabled, onCheckedChange = { configure { old -> old.copy(enabled = it) } })
+        }
+        SemanticInjectionSettings(config.dream) { transform ->
+            configure { old -> old.copy(dream = transform(old.dream)) }
         }
         Text("Embedding 模型")
         ModelSelector(modelId = config.embeddingModelId, providers = providers, type = ModelType.EMBEDDING,

@@ -568,7 +568,7 @@ private fun ModeInjectionEditSheet(
 }
 
 @Composable
-private fun InjectionPositionSelector(
+internal fun InjectionPositionSelector(
     position: InjectionPosition,
     onSelect: (InjectionPosition) -> Unit
 ) {
@@ -614,7 +614,7 @@ private fun getPositionLabel(position: InjectionPosition): String = when (positi
 }
 
 @Composable
-private fun InjectionRoleSelector(
+internal fun InjectionRoleSelector(
     role: MessageRole,
     onSelect: (MessageRole) -> Unit,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,

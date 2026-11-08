@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.memory.semantic
 
 import kotlinx.serialization.Serializable
+import me.rerere.rikkahub.data.model.InjectionPosition
 import kotlin.uuid.Uuid
 
 /** 按助手持久保存；旧 Markdown 做梦继续使用原设置。 */
@@ -21,6 +22,7 @@ data class SemanticDreamSettings(
     val segmentGapMinutes: Int = 180,
     val splitByDay: Boolean = true,
     val overlapTurns: Int = 2,
+    val injectionPosition: InjectionPosition = InjectionPosition.AT_DEPTH,
     val injectionRole: String = "system",
     val injectionDepth: Int = 0,
     val injectionTokenBudget: Int = 1000,

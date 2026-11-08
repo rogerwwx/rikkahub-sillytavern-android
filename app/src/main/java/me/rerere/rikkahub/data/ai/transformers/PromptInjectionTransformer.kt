@@ -439,31 +439,7 @@ internal fun transformMessages(
 
     // 解析 AUTHOR_NOTE 到实际位置（对已解析的冻结注入是幂等的）
     val resolvedInjections = injections.map { injection ->
-        if (injection.position == InjectionPosition.AUTHOR_NOTE) {
-            when (authorNotePosition) {
-                AuthorNotePosition.IN_CHAT -> when (injection) {
-                    is PromptInjection.RegexInjection -> injection.copy(
-                        position = InjectionPosition.AT_DEPTH,
-                        injectDepth = authorNoteDepth,
-                    )
-                    is PromptInjection.ModeInjection -> injection.copy(
-                        position = InjectionPosition.AT_DEPTH,
-                    )
-                }
-                // After Main Prompt / Story String：角色卡之后、对话之前
-                AuthorNotePosition.IN_PROMPT -> when (injection) {
-                    is PromptInjection.RegexInjection -> injection.copy(position = InjectionPosition.ANTAGONIZE)
-                    is PromptInjection.ModeInjection -> injection.copy(position = InjectionPosition.ANTAGONIZE)
-                }
-                // Before Main Prompt / Story String：提示词最前面
-                AuthorNotePosition.BEFORE_PROMPT -> when (injection) {
-                    is PromptInjection.RegexInjection -> injection.copy(position = InjectionPosition.BEFORE_SYSTEM_PROMPT)
-                    is PromptInjection.ModeInjection -> injection.copy(position = InjectionPosition.BEFORE_SYSTEM_PROMPT)
-                }
-            }
-        } else {
-            injection
-        }
+        resolveAuthorNoteInjection(injection, authorNotePosition, authorNoteDepth)
     }
 
     // 按位置分组。官方构建提示词时按 order 降序遍历 + unshift（world-info.js sortFn + WIBeforeEntries.unshift），
@@ -932,6 +908,26 @@ private fun tickCooldowns(cooldownEntries: MutableMap<Uuid, Int>) {
         }
     }
     toRemove.forEach { cooldownEntries.remove(it) }
+}
+
+internal fun resolveAuthorNoteInjection(
+    injection: PromptInjection,
+    authorNotePosition: AuthorNotePosition,
+    authorNoteDepth: Int,
+): PromptInjection {
+    if (injection.position != InjectionPosition.AUTHOR_NOTE) return injection
+    val position = when (authorNotePosition) {
+        AuthorNotePosition.IN_CHAT -> InjectionPosition.AT_DEPTH
+        AuthorNotePosition.IN_PROMPT -> InjectionPosition.ANTAGONIZE
+        AuthorNotePosition.BEFORE_PROMPT -> InjectionPosition.BEFORE_SYSTEM_PROMPT
+    }
+    return when (injection) {
+        is PromptInjection.RegexInjection -> injection.copy(
+            position = position,
+            injectDepth = if (authorNotePosition == AuthorNotePosition.IN_CHAT) authorNoteDepth else injection.injectDepth,
+        )
+        is PromptInjection.ModeInjection -> injection.copy(position = position)
+    }
 }
 
 /**

@@ -1004,7 +1004,8 @@ class GenerationLoop(
                 base
             }
         }.let { request ->
-            injectSemanticPrompt(request, semanticPrompt, assistant.semanticMemory, limitedChat.size)
+            injectSemanticPrompt(request, semanticPrompt, assistant.semanticMemory, limitedChat.size,
+                authorNotePosition = settings.authorNotePosition, authorNoteDepth = settings.authorNoteDepth)
         }.transforms(
             transformers = transformers,
             context = context,
