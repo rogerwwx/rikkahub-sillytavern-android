@@ -38,7 +38,17 @@ fun validateCompleteResponse(result: TextGenerationResult): TextGenerationResult
     val completion = result.message.generationCompletion ?: reasonCompletion
     if (completion != StreamCompletion.NORMAL ||
         reasonCompletion == StreamCompletion.TRUNCATED || reasonCompletion == StreamCompletion.FAILED
-    ) throw IncompleteStreamException("响应未正常完成：$completion")
+    ) throw IncompleteStreamException(
+        message = "响应未正常完成：$completion",
+        kind = when {
+            reasonCompletion == StreamCompletion.TRUNCATED || completion == StreamCompletion.TRUNCATED ->
+                StreamFailureKind.TRUNCATED
+            reasonCompletion == StreamCompletion.FAILED || completion == StreamCompletion.FAILED ->
+                StreamFailureKind.FAILED
+            else -> StreamFailureKind.PROTOCOL
+        },
+        finishReason = result.finishReason,
+    )
     if (result.message.parts.none { it is UIMessagePart.Text && it.text.isNotBlank() } && tools.isEmpty()) {
         throw IncompleteStreamException("响应正文为空")
     }
@@ -52,6 +62,48 @@ fun validateCompleteResponse(result: TextGenerationResult): TextGenerationResult
         if (input !is JsonObject) throw IncompleteStreamException("工具参数必须是 JSON 对象")
     }
     return result.copy(message = result.message.copy(generationCompletion = StreamCompletion.NORMAL))
+}
+
+private val streamHttpStatus = Regex("""Failed to get [a-z ]*:? ?(\d{3})""")
+private val streamBareStatus = Regex("""\b(?:HTTP|status)[ =:]*([1-5]\d{2})\b""", RegexOption.IGNORE_CASE)
+
+/**
+ * 把失败翻译成人能读的一句话：输出被截断（预算不足）、服务端拒绝、协议未完成、网络、HTTP 分开。
+ *
+ * [attempts] 是实际发出的请求次数（含重试），[elapsedMillis] 是这些尝试的总耗时。
+ * 截断是确定性的：调用方若仍重发同样的请求，只会再次截断并白等一轮。
+ */
+fun completeStreamFailureText(
+    error: Throwable,
+    attempts: Int,
+    elapsedMillis: Long,
+    budgetTokens: Int? = null,
+): String {
+    val raw = error.message.orEmpty().trim()
+    val seconds = String.format(java.util.Locale.US, "%.1f", elapsedMillis / 1000.0)
+    val effort = "尝试 $attempts 次，耗时 $seconds 秒"
+    val statusMatch = streamHttpStatus.find(raw) ?: streamBareStatus.find(raw)
+    val status = statusMatch?.groupValues?.get(1)
+    val reason = raw.substring(statusMatch?.groups?.get(1)?.range?.last?.plus(1) ?: 0)
+        .trim().trimStart(':', '-', ' ').lineSequence().joinToString(" ")
+        .replace(Regex("""(sk-|Bearer )[A-Za-z0-9._-]+"""), "***")
+        .take(90).trim()
+    val head = when {
+        error is IncompleteStreamException && error.kind == StreamFailureKind.TRUNCATED -> buildString {
+            append("模型输出被截断（输出预算不足）：")
+            append(if (budgetTokens != null) "预算 $budgetTokens token 用完" else "输出达到上限")
+            append("，finish=").append(error.finishReason ?: "length")
+            append("；重发同样的请求只会再次截断，请调低目标 token 或换输出上限更大的模型")
+            if (reason.isNotBlank()) append("（").append(reason).append("）")
+        }
+        error is IncompleteStreamException && error.kind == StreamFailureKind.FAILED ->
+            "模型拒绝本次生成：" + (raw.ifBlank { "finish=" + (error.finishReason ?: "failed") })
+        error is IncompleteStreamException -> "协议未正常完成：" + raw.ifBlank { "缺少终止信号" }
+        status != null -> "请求失败 HTTP " + status + (if (reason.isBlank()) "" else "：" + reason)
+        error is java.io.IOException -> "请求网络失败：" + raw.ifBlank { error.javaClass.simpleName } + "（可检查网络后重试）"
+        else -> "请求失败：" + (raw.ifBlank { error.javaClass.simpleName })
+    }
+    return head + "；" + effort
 }
 
 /** 压缩与记忆共用严格响应契约；开关只决定调用 Provider 的哪种传输方式。 */

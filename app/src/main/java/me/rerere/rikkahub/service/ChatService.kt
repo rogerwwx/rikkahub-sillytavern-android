@@ -67,7 +67,9 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.StreamCompletion
 import me.rerere.ai.ui.generateTextComplete
+import me.rerere.ai.ui.completeStreamFailureText
 import me.rerere.ai.ui.IncompleteStreamException
+import me.rerere.ai.ui.StreamFailureKind
 import me.rerere.ai.agent.RetryPolicy
 import me.rerere.ai.agent.withRetry
 import me.rerere.ai.ui.canResumeToolExecution
@@ -1992,8 +1994,10 @@ class ChatService(
                         appendLine("New segment ${index + 1}/${segments.size}; turn part ${segment.part}/${segment.partCount}:")
                         append(segment.text)
                     }
-                    val result = withRetry(RetryPolicy(maxRetries = 2, retryOn = {
-                        it is java.io.IOException || it is IncompleteStreamException
+                    // 与手动压缩同源：确定性截断不重试，只重试 IO 与协议未完成。
+                    val result = withRetry(RetryPolicy(maxRetries = 2, retryOn = { error ->
+                        error is java.io.IOException ||
+                            (error is IncompleteStreamException && error.kind == StreamFailureKind.PROTOCOL)
                     })) {
                         provider.generateTextComplete(setting = compressionProvider, messages = listOf(UIMessage.user(prompt)),
                             params = backgroundTextGenerationParams(compressionModel, reasoningLevel = ReasoningLevel.OFF).copy(
@@ -2416,8 +2420,21 @@ class ChatService(
             message.getTools().any { it.isPending || it.canResumeExecution }
         }) { context.getString(R.string.chat_page_compress_pending_tools) }
 
+        // 思考型模型的推理 token 与正文共享 max_tokens：旧实现只给 desiredTokens * 2，
+        // 2000 目标在上游给到 4000 就停，常常还没写完摘要就命中 length。
+        // 这里按 AUTO 思考档预留推理开销再加余量，并把上下文窗口当作单次输出硬上限
+        // （Model 没有单独的输出上限字段，未知窗口沿用原来的 32000）。
         val desiredTokens = targetTokens.coerceIn(128, 16000)
-        val inputBudget = ((model.contextWindowTokens ?: 32000) - desiredTokens * 3 - 2048).coerceIn(512, 16000)
+        val reasoningReserve = 2048
+        val outputSlack = 512
+        val outputBudget = desiredTokens + reasoningReserve + outputSlack
+        val outputLimit = (model.contextWindowTokens ?: 32000).takeIf { it > 0 } ?: 32000
+        require(outputBudget <= outputLimit) {
+            "目标 $desiredTokens token 的摘要需要输出预算 $outputBudget" +
+                "（正文 $desiredTokens + 推理预留 $reasoningReserve + 余量 $outputSlack），" +
+                "超过模型输出上限 $outputLimit；请调低目标 token 或改用输出上限更大的模型"
+        }
+        val inputBudget = (outputLimit - outputBudget - 2048).coerceIn(512, 16000)
         val segments = planCompressionSegments(messagesToCompress.map { message ->
             CompressionSource(message.id.toString(), if (message.isContextCheckpoint) "checkpoint" else message.role.name.lowercase(),
                 message.summaryAsText(maxLength = Int.MAX_VALUE))
@@ -2440,14 +2457,48 @@ class ChatService(
                 "locale" to Locale.getDefault().displayName
             )
 
-            val result = withRetry(RetryPolicy(maxRetries = 2, retryOn = {
-                it is java.io.IOException || it is IncompleteStreamException
-            })) {
-                providerHandler.generateTextComplete(setting = provider,
-                    messages = listOf(UIMessage.user(prompt)),
-                    params = backgroundTextGenerationParams(model, conversationId).copy(
-                        maxTokens = desiredTokens * 2, customBody = model.customBodies.withoutMemoryOverrides()),
-                    stream = stream)
+            // 只重试可能是瞬时的失败：IO 与协议未完成。finish reason=length 是确定性截断，
+            // 重发同样的请求只会再烧一轮输入预算并再次截断，直接带着可读原因退出。
+            var attempts = 0
+            val startedAt = System.currentTimeMillis()
+            val result = try {
+                withRetry(RetryPolicy(maxRetries = 2, retryOn = { error ->
+                    error is java.io.IOException ||
+                        (error is IncompleteStreamException && error.kind == StreamFailureKind.PROTOCOL)
+                }), onRetry = { attempt ->
+                    Logging.log(TAG, "压缩片段 ${index + 1}/${segments.size} 第 ${attempt.retry} 次重试" +
+                        "（${attempt.delay} 后）：${attempt.cause.message}")
+                }) {
+                    attempts++
+                    val attemptStartedAt = System.currentTimeMillis()
+                    try {
+                        providerHandler.generateTextComplete(setting = provider,
+                            messages = listOf(UIMessage.user(prompt)),
+                            // 思考模型的推理 token 与正文共用 maxTokens，outputBudget 已含推理预留。
+                            params = backgroundTextGenerationParams(model, conversationId).copy(
+                                maxTokens = outputBudget, customBody = model.customBodies.withoutMemoryOverrides()),
+                            stream = stream)
+                            .also { done ->
+                                Logging.log(TAG, "压缩片段 ${index + 1}/${segments.size} 尝试 $attempts 完成：" +
+                                    "耗时 ${System.currentTimeMillis() - attemptStartedAt}ms finish=${done.finishReason} " +
+                                    "输入=${done.usage?.promptTokens ?: 0} 输出=${done.usage?.completionTokens ?: 0} " +
+                                    "预算=$outputBudget")
+                            }
+                    } catch (error: Throwable) {
+                        Logging.log(TAG, "压缩片段 ${index + 1}/${segments.size} 尝试 $attempts 失败：" +
+                            "耗时 ${System.currentTimeMillis() - attemptStartedAt}ms " +
+                            "kind=${(error as? IncompleteStreamException)?.kind ?: error.javaClass.simpleName} " +
+                            "finish=${(error as? IncompleteStreamException)?.finishReason ?: "-"} ${error.message}")
+                        throw error
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                throw IllegalStateException(
+                    completeStreamFailureText(error, attempts, System.currentTimeMillis() - startedAt, outputBudget),
+                    error,
+                )
             }
             cumulativeSummary = result.message.toText().trim().takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("Failed to generate compressed summary")

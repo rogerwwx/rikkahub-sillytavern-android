@@ -7,7 +7,19 @@ import kotlinx.serialization.json.Json
 @Serializable
 enum class StreamCompletion { NORMAL, TRUNCATED, FAILED, UNKNOWN }
 
-class IncompleteStreamException(message: String) : IllegalStateException(message)
+/**
+ * 失败类别决定调用方能不能重试：[TRUNCATED] 是模型按 max_tokens 正常停下，
+ * [FAILED] 是服务端拒绝，两者重发同样的请求只会得到同样的结果；
+ * [PROTOCOL] 是连接中途结束、缺终止信号或正文/工具不完整，可能是瞬时故障。
+ */
+enum class StreamFailureKind { TRUNCATED, FAILED, PROTOCOL }
+
+class IncompleteStreamException(
+    message: String,
+    val kind: StreamFailureKind = StreamFailureKind.PROTOCOL,
+    /** 服务端给出的原始 finish reason，便于调用方记录与排查。 */
+    val finishReason: String? = null,
+) : IllegalStateException(message)
 
 /** 只有真实协议终止信号能调用；连接结束本身不提供完成证据。 */
 fun protocolCompletion(reason: String?): StreamCompletion = when (reason?.lowercase()) {
@@ -52,7 +64,15 @@ class CompleteStreamGuard {
 
     fun requireComplete(): StreamChunk.Finish {
         val finish = terminal ?: throw IncompleteStreamException("没有协议终止信号")
-        if (finish.completion != StreamCompletion.NORMAL) throw IncompleteStreamException("响应未正常完成：${finish.completion}")
+        if (finish.completion != StreamCompletion.NORMAL) throw IncompleteStreamException(
+            message = "响应未正常完成：${finish.completion}",
+            kind = when (finish.completion) {
+                StreamCompletion.TRUNCATED -> StreamFailureKind.TRUNCATED
+                StreamCompletion.FAILED -> StreamFailureKind.FAILED
+                else -> StreamFailureKind.PROTOCOL
+            },
+            finishReason = finish.finishReason,
+        )
         if (finish.finishReason.equals("requires_action", ignoreCase = true) && tools.isEmpty()) {
             throw IncompleteStreamException("工具交接响应缺少工具调用")
         }
