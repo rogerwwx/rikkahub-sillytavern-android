@@ -247,6 +247,19 @@ internal fun Conversation.withoutUnresumableToolCalls(untilNode: Int = messageNo
     return if (nodes == messageNodes) this else copy(messageNodes = nodes)
 }
 
+/** 对话楼层与语义原文共用候选顺序，压缩原文保留，摘要和注入不占楼层。 */
+internal fun List<MessageNode>.dialogueMessageNodes(): List<MessageNode> = filter { node ->
+    val message = node.currentMessage
+    !message.isContextCheckpoint && !message.isSynthetic &&
+        message.role in setOf(MessageRole.USER, MessageRole.ASSISTANT) &&
+        !(message.role == MessageRole.USER && message.parts.isEmpty() && message.toText().isBlank())
+}
+
+internal fun List<MessageNode>.messageFloorNumbers(): Map<Uuid, Int> =
+    dialogueMessageNodes().mapIndexed { index, node -> node.id to index + 1 }.toMap()
+
+internal fun Conversation.messageFloorNumbers(): Map<Uuid, Int> = messageNodes.messageFloorNumbers()
+
 fun UIMessage.toMessageNode(): MessageNode {
     return MessageNode(
         messages = listOf(this),

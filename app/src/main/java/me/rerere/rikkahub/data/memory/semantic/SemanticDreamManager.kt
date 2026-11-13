@@ -26,6 +26,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.dialogueMessageNodes
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.uuid.Uuid
@@ -641,12 +642,10 @@ class SemanticDreamManager(
 @Serializable private data class DreamOrganizeDraft(val groups: List<DreamOrganizeGroup>)
 @Serializable private data class DreamOrganizeGroup(val ids: List<String>, val content: String, val type: String)
 
-internal fun Conversation.dreamMessages(): List<DreamMessage> = messageNodes.mapNotNull { node ->
+internal fun Conversation.dreamMessages(): List<DreamMessage> = messageNodes.dialogueMessageNodes().map { node ->
     val message = node.currentMessage
-    if (message.isContextCheckpoint || message.isSynthetic || message.role !in setOf(MessageRole.USER, MessageRole.ASSISTANT)) return@mapNotNull null
     // 推理、工具提示和注入从不成为事实证据；附件只标识存在，不猜测内容。
     val text = message.toText()
-    if (text.isBlank() && message.role == MessageRole.USER && message.parts.isEmpty()) return@mapNotNull null
     DreamMessage(node.id.toString(), message.id.toString(), message.role.name.lowercase(),
         text.ifBlank { "（非文本消息，没有可用事实正文）" },
         message.createdAt.toInstant(TimeZone.currentSystemDefault()).toEpochMilliseconds(),

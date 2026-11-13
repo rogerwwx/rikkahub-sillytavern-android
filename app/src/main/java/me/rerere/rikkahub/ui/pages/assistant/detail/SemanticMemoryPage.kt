@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -17,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -264,16 +266,14 @@ private fun SemanticDreamPanel(
     val schedule by vm.dreamSchedule.collectAsStateWithLifecycle()
     val runs by vm.dreamRuns.collectAsStateWithLifecycle()
     var mode by rememberSaveable(vm.assistantId, vm.conversationId) { mutableIntStateOf(0) }
-    var startId by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf<String?>(null) }
-    var endId by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf<String?>(null) }
-    var choosingStart by remember { mutableStateOf<Boolean?>(null) }
+    var startFloor by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf("1") }
+    var endFloor by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf("") }
     val messages = history?.messages.orEmpty()
-    LaunchedEffect(messages) {
-        if (messages.none { it.messageId == startId }) startId = messages.firstOrNull()?.messageId
-        if (messages.none { it.messageId == endId }) endId = messages.lastOrNull()?.messageId
+    LaunchedEffect(messages.size) {
+        if (endFloor.isEmpty() && messages.isNotEmpty()) endFloor = messages.size.toString()
     }
-    val start = messages.firstOrNull { it.messageId == startId }
-    val end = messages.firstOrNull { it.messageId == endId }
+    val start = startFloor.trim().toIntOrNull()?.let { messages.getOrNull(it - 1) }
+    val end = endFloor.trim().toIntOrNull()?.let { messages.getOrNull(it - 1) }
     val validRange = start != null && end != null && start.position <= end.position
     val processedMessages = messages.count { it.processed }
     Column(
@@ -319,26 +319,30 @@ private fun SemanticDreamPanel(
             Text(when (mode) {
                 0 -> "从最早未处理的完整轮次继续，包含压缩隐藏的原文。要包含开场、截断回复或独立消息，请选择全部历史或指定范围。"
                 1 -> "重新梳理当前窗口的全部原文，包含当前选中的编辑正文、开场和截断回复，后台按顺序分片处理。"
-                else -> "选择原文起止消息，包含区间内双方的全部正文；已处理的区间也可以重新梳理。"
+                else -> "填写聊天中显示的起止楼层，包含区间内双方的全部原文；已处理的区间也可以重新梳理。"
             }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (mode == 2) {
-                OutlinedButton(onClick = { choosingStart = true }, enabled = messages.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth()) {
-                        Text("起点 · ${start?.let { "第 ${it.position + 1} 条 · ${if (it.role == "user") "用户" else "助手"}" } ?: "选择消息"}")
-                        start?.let { Text(it.text, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall) }
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = startFloor,
+                        onValueChange = { startFloor = it },
+                        label = { Text("起始楼层") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = endFloor,
+                        onValueChange = { endFloor = it },
+                        label = { Text("结束楼层") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
                 }
-                OutlinedButton(onClick = { choosingStart = false }, enabled = messages.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.fillMaxWidth()) {
-                        Text("终点 · ${end?.let { "第 ${it.position + 1} 条 · ${if (it.role == "user") "用户" else "助手"}" } ?: "选择消息"}")
-                        end?.let { Text(it.text, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall) }
-                    }
-                }
-                if (!validRange && messages.isNotEmpty()) Text("请将起点设为终点之前的消息，也可以选择单条消息。",
+                Text("当前窗口共 ${messages.size} 楼，范围包含起止楼层；摘要和分隔线不占楼层。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!validRange && messages.isNotEmpty()) Text("请输入 1～${messages.size} 之间的起止楼层，起始楼层不能大于结束楼层。",
                     color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -347,7 +351,7 @@ private fun SemanticDreamPanel(
                         when (mode) {
                             0 -> vm.dream()
                             1 -> vm.dreamAll()
-                            else -> vm.dreamRange(checkNotNull(startId), checkNotNull(endId))
+                            else -> vm.dreamRange(checkNotNull(start).messageId, checkNotNull(end).messageId)
                         }
                     }) {
                     Icon(HugeIcons.Moon02, null, Modifier.size(18.dp))
@@ -387,34 +391,6 @@ private fun SemanticDreamPanel(
                 }
             }
         }
-    }
-    choosingStart?.let { pickStart ->
-        AlertDialog(
-            onDismissRequest = { choosingStart = null },
-            title = { Text(if (pickStart) "选择起始消息" else "选择结束消息") },
-            text = {
-                LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(messages, key = { it.messageId }) { message ->
-                        OutlinedCard(onClick = {
-                            if (pickStart) startId = message.messageId else endId = message.messageId
-                            choosingStart = null
-                        }) {
-                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("第 ${message.position + 1} 条 · ${if (message.role == "user") "用户" else "助手"} · ${if (message.processed) "已处理" else "待处理"}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary)
-                                Text(message.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                if (!message.finished) Text("未确认正常完成，将仅总结已有正文",
-                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(relativeTime(message.createdAt), style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { choosingStart = null }) { Text("取消") } },
-        )
     }
 }
 
