@@ -122,9 +122,13 @@ fun SemanticDreamSettingsPage(id: String) {
             }
             SemanticMemorySection("Jev 可选辅助", HugeIcons.AiMagic) {
                 DreamSwitch("Jev 辅助总开关", config.jevEnabled) { value -> change { it.copy(jevEnabled = value) } }
-                DreamSwitch("召回候选筛选", config.jevRecall) { value -> change { it.copy(jevRecall = value) } }
+                DreamSwitch("召回候选重排", config.jevRecall) { value -> change { it.copy(jevRecall = value) } }
                 DreamSwitch("做梦候选审查", config.jevDreamReview) { value -> change { it.copy(jevDreamReview = value) } }
-                Text("复用华灯设置的 Jev /v1/systemone 连接；保持基础 Embedding 与混合检索。失败、不确定或缺答回退基础候选；辅助判断不会删除记忆或充当新证据。",
+                Text("复用华灯设置的 Jev /v1/systemone 连接；保持基础 Embedding 与混合检索。重排按相关性降序取语义记忆设置的 TopK，做梦审查只筛选草稿；判断失败或缺答整体回退原融合顺序，不删除记忆、不充当新证据；重排分数只表示相关性，不代表记忆真实性。",
+                    style = MaterialTheme.typography.bodySmall)
+                DreamInt("送进 Jev 的粗召回条数（1—100）", config.jevCandidateCount, 1..100) { value -> change { it.copy(jevCandidateCount = value) } }
+                DreamDecimalField("重排最低相关性（0—1，0 表示不过滤）", config.jevMinRelevance, 0.0..1.0) { value -> change { it.copy(jevMinRelevance = value) } }
+                Text("粗召回按融合顺序取前 N 条送进重排，超过 32 个问题或 64KB 请求体自动分批；N 受候选池大小限制。最低相关性为 0 时只排序不硬过滤，过滤后为空表示本轮没有相关记忆。",
                     style = MaterialTheme.typography.bodySmall)
                 DreamInt("Jev 全批请求预算毫秒（250—10000）", config.jevTimeoutMillis, 250..10000) { value -> change { it.copy(jevTimeoutMillis = value) } }
                 DreamDecimal("召回肯定概率门槛", config.jevRecallYes, 0.5..1.0) { value -> if (value > config.jevRecallNo) change { it.copy(jevRecallYes = value) } }
@@ -204,6 +208,19 @@ internal fun SemanticInjectionSettings(
     DreamNumber(label, value.toString()) { raw -> raw.toIntOrNull()?.takeIf { it in range }?.let(change) }
 @Composable private fun DreamDecimal(label: String, value: Double, range: ClosedFloatingPointRange<Double>, change: (Double) -> Unit) =
     SemanticDecimalSlider(label, value, range, onChange = change)
+/** 数值项统一用输入框：阈值 0 必须能精确填写，滑块做不到。 */
+@Composable private fun DreamDecimalField(label: String, value: Double, range: ClosedFloatingPointRange<Double>, change: (Double) -> Unit) {
+    var draft by remember(label) { mutableStateOf(decimalText(value)) }
+    var focused by remember(label) { mutableStateOf(false) }
+    LaunchedEffect(value, focused) { if (!focused) draft = decimalText(value) }
+    OutlinedTextField(value = draft, onValueChange = { text ->
+        draft = text
+        text.trim().toDoubleOrNull()?.takeIf { it.isFinite() && it in range }?.let(change)
+    }, label = { Text(label) }, singleLine = true,
+        modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused })
+}
+private fun decimalText(value: Double) =
+    if (value == value.toLong().toDouble()) value.toLong().toString() else value.toString()
 @Composable private fun DreamNumber(label: String, value: String, change: (String) -> Unit) {
     var draft by remember(label) { mutableStateOf(value) }
     var focused by remember(label) { mutableStateOf(false) }
@@ -217,9 +234,38 @@ private fun dreamStatus(value: String) = when (value) {
 }
 private fun jevDiagnosticText(raw: String): String = try {
     val details = Json.parseToJsonElement(raw).jsonObject
-    val before = details["before"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content }
-    val after = details["after"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content }
-    "原候选 ${before.size}，保留 ${after.size}，排除 ${before.size - after.size}，不确定 ${details["uncertain"]?.jsonPrimitive?.intOrNull ?: 0}。\n" +
-        "原候选 ID：${before.take(8).joinToString()}\n保留 ID：${after.take(8).joinToString()}" +
-        if (before.size > 8) "\n此处显示前8条，完整判断分布与映射保存在诊断记录中。" else ""
+    // 表达式体函数里不能 return，重排事件走独立分支。
+    if ((details["mode"] as? JsonPrimitive)?.contentOrNull == "rerank") {
+        rerankDiagnosticText(details)
+    } else {
+        val before = details["before"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content }
+        val after = details["after"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content }
+        "原候选 ${before.size}，保留 ${after.size}，排除 ${before.size - after.size}，不确定 ${details["uncertain"]?.jsonPrimitive?.intOrNull ?: 0}。\n" +
+            "原候选 ID：${before.take(8).joinToString()}\n保留 ID：${after.take(8).joinToString()}" +
+            if (before.size > 8) "\n此处显示前8条，完整判断分布与映射保存在诊断记录中。" else ""
+    }
 } catch (_: Exception) { "诊断尚未完成" }
+
+/** 召回重排事件：候选分数、注入条数、批次数、耗时与回退原因。 */
+private fun rerankDiagnosticText(details: JsonObject): String {
+    val items = details["items"]?.jsonArray.orEmpty().map { it.jsonObject }
+    val kept = items.filter { (it["kept"] as? JsonPrimitive)?.booleanOrNull == true }
+    val scores = items.mapNotNull { (it["score"] as? JsonPrimitive)?.takeIf { s -> s !is JsonNull }?.doubleOrNull }
+    val low = (details["scoreDistribution"] as? JsonObject)?.let { (it["min"] as? JsonPrimitive)?.doubleOrNull }
+    val high = (details["scoreDistribution"] as? JsonObject)?.let { (it["max"] as? JsonPrimitive)?.doubleOrNull }
+    val distribution = if (low == null || high == null) "无" else "%.2f".format(low) + "—" + "%.2f".format(high)
+    val fallback = (details["fallback"] as? JsonPrimitive)?.contentOrNull
+    val lines = items.take(8).joinToString("；") { item ->
+        val id = (item["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+        val score = (item["score"] as? JsonPrimitive)?.takeIf { s -> s !is JsonNull }?.doubleOrNull
+        val rank = (item["finalRank"] as? JsonPrimitive)?.intOrNull
+        id + "=" + (score?.let { "%.2f".format(it) } ?: "未评分") + (rank?.let { "#" + it } ?: "")
+    }
+    return "召回重排 " + items.size + " 条，已评分 " + scores.size + "，注入 " + kept.size +
+        "，批次 " + ((details["batches"] as? JsonPrimitive)?.intOrNull ?: 0) +
+        "；分数 " + distribution + "，最低相关性 " + ((details["minRelevance"] as? JsonPrimitive)?.doubleOrNull ?: 0.0) +
+        "，TopK " + ((details["topK"] as? JsonPrimitive)?.intOrNull ?: 0) +
+        "，耗时 " + "%.1f".format((details["elapsedMillis"] as? JsonPrimitive)?.doubleOrNull ?: 0.0) + " ms" +
+        (fallback?.let { "\n回退原因：" + it } ?: "") + "\n候选分数：" + lines +
+        if (items.size > 8) "\n此处显示前8条，完整分数与排名保存在诊断记录中。" else ""
+}

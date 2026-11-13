@@ -35,6 +35,10 @@ data class SemanticDreamSettings(
     val jevRecall: Boolean = false,
     val jevDreamReview: Boolean = false,
     val jevTimeoutMillis: Int = 2500,
+    /** 粗召回后送进 Jev 重排的候选条数；再多也只取融合顺序前 N 条。 */
+    val jevCandidateCount: Int = 20,
+    /** 重排后按相关性硬过滤的最低分数；0 表示只排序不过滤。 */
+    val jevMinRelevance: Double = 0.0,
     val jevRecallYes: Double = 0.80,
     val jevRecallNo: Double = 0.20,
     val jevRetentionYes: Double = 0.85,
@@ -65,6 +69,8 @@ data class SemanticDreamSettings(
             plannedTtlDays = plannedTtlDays.coerceIn(1, 3650),
             unknownTtlDays = unknownTtlDays.coerceIn(1, 3650),
             jevTimeoutMillis = jevTimeoutMillis.coerceIn(250, 10000),
+            jevCandidateCount = jevCandidateCount.coerceIn(1, 100),
+            jevMinRelevance = if (jevMinRelevance.isFinite()) jevMinRelevance.coerceIn(0.0, 1.0) else 0.0,
             jevRecallYes = recall.first, jevRecallNo = recall.second,
             jevRetentionYes = retention.first, jevRetentionNo = retention.second,
             jevEvidenceYes = evidence.first, jevEvidenceNo = evidence.second,

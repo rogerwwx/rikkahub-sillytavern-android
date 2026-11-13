@@ -257,15 +257,29 @@ class JevClient(
         return base + jitter
     }
 
+    /** 设置页只展示模型名，用于诊断里记录本次判断实际使用的版本。 */
+    suspend fun modelVersion(): String = effectiveConfig()?.model ?: "unconfigured"
+
     companion object {
         /**
          * 官方没有"问题数量"上限，真正的约束是 64k token/请求。
          * 这里设一个保守上限防止一次请求铺得太开，超了要分批。
          */
         const val JEV_MAX_QUESTIONS = 32
+
+        /** 官方请求体上限；分批按真实序列化长度计算，不按字符数估算。 */
+        const val JEV_MAX_REQUEST_BYTES = 64 * 1024
+
         private const val JEV_BACKOFF_CAP_MS = 5_000L
     }
 }
+
+/**
+ * 按实际序列化结果估算请求体字节数，供调用方守住 64KB。
+ * 模型名按 128 字符保守预留，因此估算值不小于真实请求体。
+ */
+fun estimateRequestBodyBytes(state: JsonElement, questions: Map<String, JevQuestion>): Int =
+    JevJson.encodeToString(JevRequest(state, "x".repeat(128), questions)).toByteArray(Charsets.UTF_8).size
 
 class JevUnavailableException(message: String) : Exception(message)
 class JevHttpException(val code: Int, message: String) : Exception("HTTP $code: $message")

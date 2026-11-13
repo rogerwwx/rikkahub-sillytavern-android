@@ -393,12 +393,12 @@ class GenerationLoop(
                             semanticJevAssist.configurationRevision() else ""
                     if (revision != semanticRevision) {
                         semanticRecall = if (semanticQuery.isBlank()) null else {
-                            val base = budgetSemanticRecall(
-                                semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticQuery, semanticConfig), semanticConfig)
-                            val screened = semanticJevAssist.filterRecall(assistant.id.toString(), conversationId.toString(), semanticQuery,
+                            // 重排作用在未按 token 预算裁剪的候选池上；预算只决定最终注入多少。
+                            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticQuery, semanticConfig)
+                            val reranked = semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(), semanticQuery,
                                 messages.takeLast(6).joinToString("\n") { "${it.role}: ${it.toText()}" }.take(6000),
-                                semanticConfig, base)
-                            budgetSemanticRecall(screened, semanticConfig)
+                                semanticConfig, recalled)
+                            budgetSemanticRecall(reranked, semanticConfig)
                         }
                         semanticRevision = revision
                     }
