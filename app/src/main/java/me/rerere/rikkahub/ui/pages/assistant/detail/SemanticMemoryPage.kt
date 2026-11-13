@@ -871,10 +871,10 @@ private fun SemanticSettingsPanel(
             SemanticIntSlider("候选倍率", config.candidateMultiplier, 1..10) { value ->
                 configure { it.copy(candidateMultiplier = value) }
             }
-            NumberSetting("RRF 排名融合参数（1—1000）", config.rrfK.toString()) { raw ->
+            NumberSetting("单路退化排名参数（1—1000）", config.rrfK.toString()) { raw ->
                 raw.toIntOrNull()?.takeIf { it in 1..1000 }?.let { value -> configure { it.copy(rrfK = value) } }
             }
-            Text("候选倍率控制参与融合的候选量，RRF 参数控制关键词与向量排名的融合。",
+            Text("默认按分数融合：关键词与向量各自归一化后加权，名次接近的两路命中另有共识加成；综合分再按相关性 2 : 重要度 1 加权。不按真实时间做新鲜度衰减——剧情内时间可与现实脱钩。只有单路失败退化时，才用该参数做 1/(k+名次+1) 的排名衰减。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         CardGroup(modifier = Modifier.fillMaxWidth(), title = { Text("数据管理") }) {
@@ -1188,7 +1188,8 @@ private fun StatDivider() {
 private fun recallScoreLine(hit: SemanticRecallHit): String {
     val lexical = hit.rank.lexicalScore?.let { "BM25 " + "%.3f".format(it) } ?: "BM25 无"
     val vector = hit.rank.vectorScore?.let { "余弦 " + "%.3f".format(it) } ?: "余弦 无"
-    val fused = "RRF " + "%.4f".format(hit.rank.score)
+    // rank.score 现在是"融合分 + 重要度加权（2:1）"后的综合分；不按时间做新鲜度衰减。
+    val fused = "综合 " + "%.4f".format(hit.rank.score)
     val note = if (hit.rank.vectorRanked) "" else " · 仅关键词入榜"
     return lexical + " · " + vector + " · " + fused + note
 }

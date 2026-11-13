@@ -33,6 +33,8 @@ data class SemanticRecallResult(
     val degraded: List<String>,
     val durationNanos: Long,
     val eventId: String,
+    /** 融合排序后的候选池（TopK 截断之前），供 Jev 重排序等下游阶段使用。 */
+    val candidates: List<SemanticRecallHit> = emptyList(),
 )
 
 /** 手动管理、工具、自动召回和维护共同使用的唯一语义后端。 */
@@ -262,19 +264,32 @@ class SemanticMemoryRepository(
                 filters["inactive_status"] = all.count { it.status != "active" }
                 filters["expired"] = all.count { it.status == "active" && !it.isCore && it.expiresAt != null && it.expiresAt <= now }
                 val degraded = mutableListOf<String>()
+                var lexicalError = false
+                var vectorError = false
                 val rawVectorScores = mutableMapOf<String, Double>()
                 val limit = config.topK * config.candidateMultiplier
+                // 查询侧中文二元组与 jieba 词元一起 OR 连接：短查询和专有名词的切词差异由二元组补召回。
+                // jieba_query 无词元时用哨兵词占位，避免 MATCH 空串抛 SQLiteException。
+                val bigramSuffix = semanticCjkBigramQuery(query).let { if (it.isEmpty()) "" else " OR " + it }
                 val lexical = try {
                     if (query.isBlank()) emptyList() else {
+                        // 用编号参数保持绑定顺序为 0..4（查询、助手、窗口、时间、条数）不变，
+                        // 二元组扩展作为第 6 个参数只在 SQL 文本里引用，避免改变既有 DAO 参数契约。
                         dao.lexical(SimpleSQLiteQuery("""SELECT m.id AS id, bm25(semantic_fts) AS score
                             FROM semantic_fts JOIN semantic_memory m ON m.id = semantic_fts.id
-                            WHERE semantic_fts MATCH jieba_query(?) AND m.assistantId = ? AND m.conversationId = ? AND m.status = 'active'
-                            AND (m.isCore = 1 OR m.expiresAt IS NULL OR m.expiresAt > ?)
-                            ORDER BY score ASC, m.id LIMIT ?""", arrayOf<Any?>(query.trim().take(4096), assistantId, conversationId, now, limit)))
+                            WHERE semantic_fts MATCH (COALESCE(NULLIF(jieba_query(?1), ''), $SEMANTIC_NO_LEXICAL_TERM) || ?6)
+                            AND m.assistantId = ?2 AND m.conversationId = ?3 AND m.status = 'active'
+                            AND (m.isCore = 1 OR m.expiresAt IS NULL OR m.expiresAt > ?4)
+                            ORDER BY score ASC, m.id LIMIT ?5""", arrayOf<Any?>(
+                            query.trim().take(4096), assistantId, conversationId, now, limit, bigramSuffix)))
                             .map { it.id to it.score }
                     }
                 } catch (error: CancellationException) { throw error
-                } catch (error: Exception) { degraded += "BM25 检索失败（${error.javaClass.simpleName}）"; emptyList() }
+                } catch (error: Exception) {
+                    lexicalError = true
+                    degraded += "BM25 检索失败（${error.javaClass.simpleName}）"
+                    emptyList()
+                }
                 val vector = try {
                     val base = fingerprint(config)
                     val (queryFingerprint, queryVectors) = request(assistantId, listOf(query), config, "query",
@@ -309,13 +324,19 @@ class SemanticMemoryRepository(
                         .filter { it.second >= config.minSimilarity }.sortedByDescending { it.second }.take(limit)
                 } catch (error: CancellationException) { throw error
                 } catch (error: Exception) {
+                    vectorError = true
                     degraded += if (error.message?.startsWith("请明确") == true || error.message?.startsWith("选定") == true ||
                         error.message?.startsWith("语义 Embedding") == true || error.message?.startsWith("Embedding ") == true)
                         error.message!! else "向量路不可用（${error.javaClass.simpleName}）"
                     filters["invalid_vector"] = active.size
                     emptyList()
                 }
-                val ranked = fuseSemanticRanks(lexical, vector, config.minSimilarity, limit * 2, config.rrfK)
+                // 融合走 LivingMemory 默认的 score 分数融合，随后只做重要度加权；
+                // 角色扮演里剧情时间与真实时钟脱钩，故不按写入/访问时间做新鲜度衰减。
+                // 单路失败时按排名占位，避免与失败路线比较名次。
+                val importance = active.associate { it.id to it.importance }
+                val ranked = fuseSemanticRanks(lexical, vector, config.minSimilarity, limit * 2, config.rrfK,
+                    importance, lexicalError = lexicalError, vectorError = vectorError)
                 // 核心只在已相关的候选内获得有限优先名额，不能绕过检索门槛。
                 // 网络等待期间编辑/删除/归档的候选退出本次结果；过滤发生在 TopK 之前。
                 val currentById = dao.revisions(assistantId, conversationId).associateBy { it.id }
@@ -326,17 +347,26 @@ class SemanticMemoryRepository(
                     }?.let { snapshot }
                 }.associateBy { it.id }
                 filters["changed_during_recall"] = active.size - byId.size
-                val core = ranked.filter { byId[it.id]?.isCore == true }.take(config.coreBudget)
-                val selected = (core + ranked).distinctBy { it.id }.filter { it.id in byId }.take(config.topK)
-                val hits = selected.mapNotNull { rank -> byId[rank.id]?.let {
+                // 候选池保持融合顺序，供下游（Jev 重排序）在不低于 TopK 的范围内重排。
+                fun hitOf(rank: SemanticRankHit): SemanticRecallHit? = byId[rank.id]?.let {
                     SemanticRecallHit(it, rank.copy(vectorScore = rawVectorScores[rank.id] ?: rank.vectorScore))
-                } }
+                }
+                val candidates = ranked.mapNotNull(::hitOf)
+                val stable = ranked.filter { it.id in byId }
+                // MMR 用词袋 Jaccard 把近似重复的记忆往后排；放在迟到变更剔除之后，避免浪费名额。
+                val ordered = applySemanticMmr(stable, config.topK) { id -> byId[id]?.content ?: "" }
+                val core = stable.filter { byId[it.id]?.isCore == true }.take(config.coreBudget)
+                val selected = (core + ordered).distinctBy { it.id }.take(config.topK)
+                val hits = selected.mapNotNull(::hitOf)
                 val duration = System.nanoTime() - start
                 val status = if (degraded.size == 2) "failure" else if (hits.isEmpty()) "empty" else "success"
-                val result = SemanticRecallResult(hits, lexical.size, vector.size, filters, degraded, duration, event.id)
+                val result = SemanticRecallResult(hits, lexical.size, vector.size, filters, degraded, duration, event.id,
+                    candidates = candidates)
                 dao.putEvent(event.copy(status = status, durationNanos = duration, detailJson = buildJsonObject {
                     put("lexicalCandidates", lexical.size); put("vectorCandidates", vector.size)
                     put("deduplicatedCandidates", ranked.size); put("recalled", hits.size); put("injected", 0)
+                    put("fusionMode", SemanticRankingDefaults.FUSION_MODE.name.lowercase())
+                    put("candidatePool", candidates.size)
                     put("queryHash", semanticContentHash(query))
                     put("hits", JsonArray(hits.map { hit -> buildJsonObject {
                         put("id", hit.memory.id); put("version", hit.memory.contentVersion)

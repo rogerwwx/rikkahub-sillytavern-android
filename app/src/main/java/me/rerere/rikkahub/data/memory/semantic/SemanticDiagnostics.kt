@@ -54,6 +54,6 @@ fun semanticRecallScoreLines(event: SemanticDiagnosticEvent): List<String> = run
         val vectorRanked = hit["vectorRanked"]?.jsonPrimitive?.booleanOrNull
             ?: (hit["vectorScore"]?.jsonPrimitive?.contentOrNull != null)
         "${hit["id"]?.jsonPrimitive?.content} / v${hit["version"]?.jsonPrimitive?.content} / ${hit["type"]?.jsonPrimitive?.content}" +
-            "：BM25 ${hit["lexicalScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；余弦 ${hit["vectorScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；RRF ${hit["score"]?.jsonPrimitive?.content}；向量参与 ${if (vectorRanked) "是" else "否"}"
+            "：BM25 ${hit["lexicalScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；余弦 ${hit["vectorScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；综合 ${hit["score"]?.jsonPrimitive?.content}；向量参与 ${if (vectorRanked) "是" else "否"}"
     } ?: emptyList()
 }.getOrDefault(emptyList())
