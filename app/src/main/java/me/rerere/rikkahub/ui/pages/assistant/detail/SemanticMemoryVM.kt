@@ -39,10 +39,12 @@ class SemanticMemoryVM(
     val events = MutableStateFlow<List<SemanticDiagnosticEvent>>(emptyList())
     val allEvents = MutableStateFlow<List<SemanticDiagnosticEvent>>(emptyList())
     val diskSizes = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val activeCount = MutableStateFlow(0)
     val validCount = MutableStateFlow(0)
     val dimensions = MutableStateFlow<Set<Int>>(emptySet())
     val indexedAt = MutableStateFlow<Long?>(null)
     val wholeLibraryCount = MutableStateFlow(0L)
+    val wholeActiveCount = MutableStateFlow(0)
     val wholeValidCount = MutableStateFlow(0)
     val wholeDimensions = MutableStateFlow<Set<Int>>(emptySet())
     val recallQuery = MutableStateFlow("")
@@ -80,6 +82,15 @@ class SemanticMemoryVM(
     fun selectAll() {
         val current = memories.value.filter { it.matches(query.value, typeFilter.value, statusFilter.value) }
         selected.value = semanticSelectAll(current.map { it.id })
+    }
+    /** 只对当前筛选结果逐条反转，其他筛选条件下的选择保持不变。 */
+    fun invertSelection() {
+        val visible = memories.value
+            .filter { it.matches(query.value, typeFilter.value, statusFilter.value) }
+            .map { it.id }
+        val next = selected.value.toMutableSet()
+        visible.forEach { id -> if (!next.add(id)) next.remove(id) }
+        selected.value = next
     }
     fun clearSelection() { selected.value = emptySet() }
     fun toggle(id: String) { selected.value = semanticToggleSelection(selected.value, id) }
@@ -119,11 +130,15 @@ class SemanticMemoryVM(
         refreshDiagnostics()
     }
 
+    /** 直接重建，不排后台队列：结果当场写入，完成后提示成功条数。 */
     fun rebuild(ids: List<String>) = action {
         val config = repository.assistantSettings(assistantId) ?: error("助手不存在")
-        val job = maintenance.create(assistantId, conversationId, ids, config)
-        SemanticMaintenanceWorker.schedule(context, job.id)
-        message.value = "已创建 ${job.items.size} 条的持久重建任务"
+        require(ids.isNotEmpty()) { "没有需要重建的条目" }
+        require(config.embeddingModelId != null) { "请先选择 Embedding 模型" }
+        val errors = repository.embed(assistantId, conversationId, ids, config, "rebuild", force = true)
+        val failed = errors.count { it.value != null }
+        message.value = if (failed == 0) "已重建 ${ids.size} 条向量"
+        else "已重建 ${ids.size - failed} 条；$failed 条失败：${errors.entries.first { it.value != null }.value}"
         refreshDiagnostics()
     }
 
@@ -239,21 +254,29 @@ class SemanticMemoryVM(
         val items = repository.list(assistantId, conversationId)
         val config = repository.assistantSettings(assistantId)
         val base = config?.let { fingerprintOrNull(it) }
-        val valid = items.filter { base != null && repository.validVector(it, base, config?.dimensions) }
+        // 待向量化只统计当前活跃条目：归档、过期、已替代的条目不参与日常召回，也不算缺口。
+        val active = items.filter { it.status == "active" }
+        val valid = active.filter { base != null && repository.validVector(it, base, config?.dimensions) }
+        activeCount.value = active.size
         validCount.value = valid.size
         dimensions.value = valid.mapNotNull { it.embeddingDimension }.toSet()
         indexedAt.value = valid.mapNotNull { it.indexedAt }.maxOrNull()
         repository.database.openHelper.readableDatabase.query("SELECT count(*) FROM semantic_memory").use {
             wholeLibraryCount.value = if (it.moveToFirst()) it.getLong(0) else 0L
         }
-        val wholeValid = settingsStore.awaitLoaded().assistants.flatMap { assistant ->
+        val wholeActive = settingsStore.awaitLoaded().assistants.flatMap { assistant ->
             val config = assistant.semanticMemory
             val base = fingerprintOrNull(config)
-            val rows = repository.dao.listOfAssistant(assistant.id.toString())
-            rows.filter { base != null && repository.validVector(it, base, config.dimensions) }
+            repository.dao.listOfAssistant(assistant.id.toString())
+                .filter { it.status == "active" }
+                .map { it to base }
         }
-        wholeValidCount.value = wholeValid.size
-        wholeDimensions.value = wholeValid.mapNotNull { it.embeddingDimension }.toSet()
+        wholeActiveCount.value = wholeActive.size
+        val wholeValidRows = wholeActive.filter { (row, base) ->
+            base != null && repository.validVector(row, base, null)
+        }.map { it.first }
+        wholeValidCount.value = wholeValidRows.size
+        wholeDimensions.value = wholeValidRows.mapNotNull { it.embeddingDimension }.toSet()
     }
 
     private suspend fun fingerprintOrNull(config: SemanticMemorySettings): String? = try { repository.fingerprint(config) }
