@@ -677,7 +677,8 @@ private fun ChatPageContent(
                             toaster.show(context.getString(R.string.slash_toast_no_model), type = ToastType.Error)
                             return@ChatInput
                         }
-                        if (inputState.isEditing()) {
+                        val wasEditing = inputState.isEditing()
+                        if (wasEditing) {
                             vm.handleMessageEdit(inputState.getContents(), inputState.editingMessage!!)
                             inputState.clearInput()
                         } else {
@@ -686,9 +687,11 @@ private fun ChatPageContent(
                         }
                         barFocusManager.clearFocus(force = true)
                         barKeyboard?.hide()
-                        scope.launch {
-                            delay(100.milliseconds)
-                            chatListState.requestScrollToItem(conversation.messageNodes.size + 5)
+                        if (!wasEditing) {
+                            scope.launch {
+                                delay(100.milliseconds)
+                                chatListState.requestScrollToItem(conversation.messageNodes.size + 5)
+                            }
                         }
                     },
                     onLongSendClick = {
