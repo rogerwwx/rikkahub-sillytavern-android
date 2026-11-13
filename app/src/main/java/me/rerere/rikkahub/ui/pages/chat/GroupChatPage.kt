@@ -337,6 +337,7 @@ fun GroupChatPage(groupId: String) {
     }
 
     val messageNodes = conversation?.messageNodes ?: emptyList()
+    val messageFloors = remember(messageNodes) { messageNodes.messageFloorNumbers() }
     val speakerMap = conversation?.speakerMap ?: emptyMap()
     val lastAssistantSpeakerId = messageNodes.lastOrNull()?.let { speakerMap[it.id] }
 
@@ -701,6 +702,7 @@ fun GroupChatPage(groupId: String) {
                 }
                 ChatMessage(
                     node = node,
+                    messageFloor = messageFloors[node.id],
                     assistant = speaker ?: members.firstOrNull(),
                     model = null,
                     loading = (isGenerating || queueStatus.contains("正在") || queueStatus.contains("typing", ignoreCase = true)) && index >= messageNodes.lastIndex - 2,
@@ -749,6 +751,9 @@ fun GroupChatPage(groupId: String) {
                         val msg = node.messages[node.selectIndex]
                         inputState.setContents(msg.parts)
                         inputState.editingMessage = msg.id
+                    },
+                    onEditReasoning = { text ->
+                        scope.launch { chatService.editMessageReasoning(currentConvId, node.currentMessage.id, text) }
                     },
                     onDelete = { scope.launch { chatService.deleteMessage(currentConvId, node.messages.first().id) } },
                     onShare = {},

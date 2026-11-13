@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
@@ -111,6 +112,8 @@ import me.rerere.rikkahub.data.datastore.getSelectedTTSProvider
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.messageForDisplay
+import me.rerere.rikkahub.data.model.reasoningText
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.service.ChatError
@@ -155,7 +158,7 @@ import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.ui.pages.assistant.detail.hasFrontendCardContent
 
 private val WEB_ACTIONS = setOf(
-    "copy", "delete", "regenerate", "translate", "favorite", "share", "edit", "speak", "menu",
+    "copy", "delete", "regenerate", "translate", "favorite", "share", "edit", "reasoning_menu", "speak", "menu",
 )
 
 @Composable
@@ -503,21 +506,22 @@ private fun ChatPageContent(
     val ttsAvailable by tts.isAvailable.collectAsStateWithLifecycle()
     // 翻译与原生消息菜单同一入口：先选目标语言，不直接用系统语言
     var webTranslateMessage by remember { mutableStateOf<UIMessage?>(null) }
-    var webEditIndex by remember { mutableStateOf<Int?>(null) }
-    var webEditText by remember { mutableStateOf("") }
+    var webReasoningMenuId by remember { mutableStateOf<Uuid?>(null) }
+    var webReasoningMessageId by remember { mutableStateOf<Uuid?>(null) }
+    var webReasoningText by remember { mutableStateOf("") }
     // 消息预览里点某条后，等预览关闭再让 WebView 滚到对应消息
     var webScrollToMessageId by remember { mutableStateOf<String?>(null) }
 
     // WebView 模式下的展示用消息：与原生渲染同一套展示层转换（消息正则
-    var displayMessages by remember { mutableStateOf(conversation.messageNodes.map { it.currentMessage }) }
+    var displayMessages by remember { mutableStateOf(conversation.messageNodes.map { it.messageForDisplay() }) }
     LaunchedEffect(conversation.messageNodes, frontendCardPreferredNow, loadingJob != null) {
         // 先立刻把原始消息交给页面：展示层转换是挂起操作，等它跑完再显示会让
-        displayMessages = conversation.messageNodes.map { it.currentMessage }
+        displayMessages = conversation.messageNodes.map { it.messageForDisplay() }
         displayMessages = if (!frontendCardPreferredNow) {
-            conversation.messageNodes.map { it.currentMessage }
+            conversation.messageNodes.map { it.messageForDisplay() }
         } else {
             runCatching {
-                conversation.messageNodes.map { it.currentMessage }.visualTransforms(
+                conversation.messageNodes.map { it.messageForDisplay() }.visualTransforms(
                     transformers = listOf(
                         me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer,
                         me.rerere.rikkahub.data.ai.transformers.OutputTagCleanupTransformer,
@@ -531,7 +535,7 @@ private fun ChatPageContent(
                     settings = setting,
                     conversationId = conversation.id,
                 )
-            }.getOrDefault(conversation.messageNodes.map { it.currentMessage })
+            }.getOrDefault(conversation.messageNodes.map { it.messageForDisplay() })
         }
     }
 
@@ -944,30 +948,68 @@ private fun ChatPageContent(
                     onDismissRequest = { webPreviewImage = null },
                 )
             }
-            // 编辑对话框：改完写回同一条消息，走原生编辑路径
-            webEditIndex?.let { index ->
-                val message = webRawVisibleMessages.getOrNull(index)
+            // 思考长按菜单只操作可见思考，复制面板不混入消息正文。
+            webReasoningMenuId?.let { messageId ->
+                val message = webRawVisibleMessages.firstOrNull { it.id == messageId }
                 if (message == null) {
-                    webEditIndex = null
+                    webReasoningMenuId = null
+                } else {
+                    val node = conversation.messageNodes.find { it.currentMessage.id == message.id }
+                    val reasoningText = (node?.messageForDisplay(message) ?: message).reasoningText()
+                    AlertDialog(
+                        onDismissRequest = { webReasoningMenuId = null },
+                        title = { Text("思考内容") },
+                        text = {
+                            Column {
+                                TextButton(
+                                    onClick = {
+                                        webCopyMessage = message.copy(
+                                            parts = listOf(me.rerere.ai.ui.UIMessagePart.Text(reasoningText)),
+                                        )
+                                        webReasoningMenuId = null
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("自由复制") }
+                                TextButton(
+                                    enabled = loadingJob == null || message.id != webRawVisibleMessages.lastOrNull()?.id,
+                                    onClick = {
+                                        webReasoningText = reasoningText
+                                        webReasoningMessageId = message.id
+                                        webReasoningMenuId = null
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text("编辑") }
+                            }
+                        },
+                        confirmButton = {},
+                    )
+                }
+            }
+            // 思考正文独立编辑，不替换消息中的回答、附件和工具。
+            webReasoningMessageId?.let { messageId ->
+                val message = webRawVisibleMessages.firstOrNull { it.id == messageId }
+                if (message == null) {
+                    webReasoningMessageId = null
                 } else {
                     AlertDialog(
-                        onDismissRequest = { webEditIndex = null },
-                        title = { Text(stringResource(R.string.edit)) },
+                        onDismissRequest = { webReasoningMessageId = null },
+                        title = { Text("编辑思考内容") },
                         text = {
                             OutlinedTextField(
-                                value = webEditText,
-                                onValueChange = { webEditText = it },
-                                modifier = Modifier.fillMaxWidth(),
+                                value = webReasoningText,
+                                onValueChange = { webReasoningText = it },
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                                minLines = 6,
                             )
                         },
                         confirmButton = {
                             TextButton(onClick = {
-                                vm.handleMessageEdit(listOf(me.rerere.ai.ui.UIMessagePart.Text(webEditText)), message.id)
-                                webEditIndex = null
+                                vm.handleMessageReasoningEdit(webReasoningText, message.id)
+                                webReasoningMessageId = null
                             }) { Text(stringResource(R.string.confirm)) }
                         },
                         dismissButton = {
-                            TextButton(onClick = { webEditIndex = null }) { Text(stringResource(R.string.cancel)) }
+                            TextButton(onClick = { webReasoningMessageId = null }) { Text(stringResource(R.string.cancel)) }
                         },
                     )
                 }
@@ -1556,6 +1598,7 @@ private fun ChatPageContent(
                                         inputState.setContents(message.parts)
                                         inputState.editingMessage = message.id
                                     }
+                                    "reasoning_menu" -> webReasoningMenuId = message.id
 
                                     "speak" -> {
                                         if (tts.isSpeaking.value) {
@@ -1681,6 +1724,7 @@ private fun ChatPageContent(
                     inputState.setContents(msg.parts)
                     inputState.editingMessage = msg.id
                 },
+                onEditReasoning = { message, text -> vm.handleMessageReasoningEdit(text, message.id) },
                 onForkMessage = { msg ->
                     scope.launch {
                         val fork = vm.forkMessage(message = msg)

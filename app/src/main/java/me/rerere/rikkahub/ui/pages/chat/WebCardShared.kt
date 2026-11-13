@@ -42,6 +42,8 @@ import me.rerere.rikkahub.utils.computeAIIconByName
 import me.rerere.rikkahub.utils.toMessageTimeString
 import me.rerere.rikkahub.ui.components.richtext.TrackWebViewPresence
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.messageFloorNumbers
+import me.rerere.rikkahub.data.model.messageForDisplay
 import androidx.compose.ui.unit.dp
 
 internal fun androidx.compose.ui.graphics.Color.toCssHex(): String =
@@ -176,6 +178,7 @@ internal fun buildState(
     generating: Boolean = false,
 ): JsonObject = buildJsonObject {
     val compressedIndex = nodes.indexOfLast { it.currentMessage.isContextCheckpoint }
+    val messageFloors = nodes.messageFloorNumbers()
     put(
         "compressedBeforeMessageId",
         if (compressedIndex > 0) nodes[compressedIndex].currentMessage.id.toString() else "",
@@ -187,7 +190,7 @@ internal fun buildState(
                 val node = nodes.find { node -> node.messages.any { it.id == message.id } }
                 add(
                     buildMessage(
-                        message = message,
+                        message = node?.messageForDisplay(message) ?: message,
                         assistant = assistant,
                         settings = settings,
                         swipeCount = node?.messages?.size ?: 1,
@@ -196,6 +199,7 @@ internal fun buildState(
                         favorited = node?.isFavorite ?: false,
                         iconText = iconText,
                         labels = labels,
+                        messageFloor = node?.id?.let { messageFloors[it] },
                     ),
                 )
             }
@@ -229,6 +233,7 @@ internal fun buildMessage(
     favorited: Boolean = false,
     iconText: (String) -> String? = { null },
     labels: WebLabels = WebLabels(),
+    messageFloor: Int? = null,
 ): JsonObject {
     val isUser = message.role == MessageRole.USER
     val textParts = message.parts.filterIsInstance<UIMessagePart.Text>()
@@ -359,6 +364,7 @@ internal fun buildMessage(
         put("swipeIndex", JsonPrimitive(swipeIndex))
         put("nodeId", JsonPrimitive(nodeId))
         put("id", message.id.toString())
+        messageFloor?.let { put("floor", it) }
         put("role", if (isUser) "user" else "assistant")
         put("name", name)
         put("avatar", avatar)

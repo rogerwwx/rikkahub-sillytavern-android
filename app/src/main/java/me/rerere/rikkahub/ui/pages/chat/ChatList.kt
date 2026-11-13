@@ -112,6 +112,7 @@ import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.messageFloorNumbers
 import me.rerere.rikkahub.data.model.withConversation
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.message.ChatMessage
@@ -151,6 +152,7 @@ fun ChatList(
     onRegenerate: (UIMessage) -> Unit = {},
     onImpersonate: ((UIMessage) -> Unit)? = null,
     onEdit: (UIMessage) -> Unit = {},
+    onEditReasoning: ((UIMessage, String) -> Unit)? = null,
     onForkMessage: (UIMessage) -> Unit = {},
     onDelete: (UIMessage) -> Unit = {},
     onDeleteMessages: (List<UIMessage>) -> Unit = {},
@@ -346,6 +348,7 @@ fun ChatList(
                 onRegenerate = onRegenerate,
                 onImpersonate = onImpersonate,
                 onEdit = onEdit,
+                onEditReasoning = onEditReasoning,
                 onForkMessage = onForkMessage,
                 onDelete = onDelete,
                 onDeleteMessages = onDeleteMessages,
@@ -417,6 +420,7 @@ private fun ChatListNormal(
     onRegenerate: (UIMessage) -> Unit,
     onImpersonate: ((UIMessage) -> Unit)? = null,
     onEdit: (UIMessage) -> Unit,
+    onEditReasoning: ((UIMessage, String) -> Unit)? = null,
     onForkMessage: (UIMessage) -> Unit,
     onDelete: (UIMessage) -> Unit,
     onDeleteMessages: (List<UIMessage>) -> Unit,
@@ -496,6 +500,9 @@ private fun ChatListNormal(
             .associateBy { it.id }
     }
     val lastMessageIndex = conversation.messageNodes.lastIndex
+    val messageFloors = remember(conversation.messageNodes) {
+        conversation.messageFloorNumbers()
+    }
     // 压缩原文仍可翻阅；此边界只用于展示分隔行，不改变请求上下文。
     val compressedPrefixCount = remember(conversation.messageNodes) {
         conversation.messageNodes.compressedPrefixSize()
@@ -583,12 +590,16 @@ private fun ChatListNormal(
                                 loading = loading && index == lastMessageIndex,
                                 // 官方深度语义：最新一条为 0，向前递增
                                 messageDepth = lastMessageIndex - index,
+                                messageFloor = messageFloors[node.id],
                                 onRegenerate = {
                                     onRegenerate(node.currentMessage)
                                 },
                                 onImpersonate = onImpersonate?.let { { it(node.currentMessage) } },
                                 onEdit = {
                                     onEdit(node.currentMessage)
+                                },
+                                onEditReasoning = onEditReasoning?.let { edit ->
+                                    { text -> edit(node.currentMessage, text) }
                                 },
                                 onFork = {
                                     onForkMessage(node.currentMessage)

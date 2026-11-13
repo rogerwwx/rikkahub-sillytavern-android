@@ -15,18 +15,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
@@ -83,6 +87,8 @@ import me.rerere.rikkahub.data.datastore.allRegexesOf
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.messageForDisplay
+import me.rerere.rikkahub.data.model.reasoningText
 import me.rerere.rikkahub.data.model.TRANSPARENT_BUBBLE as TRANSPARENT_BUBBLE_SENTINEL
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.ui.components.richtext.CardHostContext
@@ -132,10 +138,12 @@ fun ChatMessage(
     // 用 minDepth/maxDepth 限定生效范围，必须传真实值，否则 maxDepth 失效、
     // 历史消息会被重复注入 HTML。
     messageDepth: Int = 0,
+    messageFloor: Int? = null,
     onFork: () -> Unit,
     onRegenerate: () -> Unit,
     onImpersonate: (() -> Unit)? = null,
     onEdit: () -> Unit,
+    onEditReasoning: ((String) -> Unit)? = null,
     onShare: () -> Unit,
     onDelete: () -> Unit,
     onUpdate: (MessageNode) -> Unit,
@@ -154,7 +162,7 @@ fun ChatMessage(
     /** 卡把开局正文写回消息的入口。 */
     cardMessagesJson: String = "[]",
 ) {
-    val message = node.messages[node.selectIndex]
+    val message = node.messageForDisplay()
     val settings = LocalSettings.current.displaySetting
     val chatFontFamily = LocalChatFontFamily.current ?: rememberChatFontFamily(settings)
     val textStyle = LocalTextStyle.current.copy(
@@ -164,6 +172,10 @@ fun ChatMessage(
     )
     var showActionsSheet by remember { mutableStateOf(false) }
     var showSelectCopySheet by remember { mutableStateOf(false) }
+    var showReasoningActions by remember(message.id) { mutableStateOf(false) }
+    var showReasoningCopySheet by remember(message.id) { mutableStateOf(false) }
+    var showReasoningEditor by remember(message.id) { mutableStateOf(false) }
+    var reasoningEditText by remember(message.id) { mutableStateOf("") }
     val navController = LocalNavController.current
     val context = LocalContext.current
     val colorScheme = MaterialTheme.colorScheme
@@ -210,6 +222,12 @@ fun ChatMessage(
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                onEditReasoning = if (loading || onEditReasoning == null) null else {
+                    {
+                        reasoningEditText = message.reasoningText()
+                        showReasoningActions = true
+                    }
+                },
                 cardHost = cardHost,
                 cardMessagesJson = cardMessagesJson,
             )
@@ -260,7 +278,7 @@ fun ChatMessage(
         )
 
         ProvideTextStyle(textStyle) {
-            ChatMessageNerdLine(message = message)
+            ChatMessageNerdLine(message = message, messageFloor = messageFloor)
         }
 
     }
@@ -307,6 +325,62 @@ fun ChatMessage(
             }
         )
     }
+    if (showReasoningActions) {
+        AlertDialog(
+            onDismissRequest = { showReasoningActions = false },
+            title = { Text("思考内容") },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = {
+                            showReasoningActions = false
+                            showReasoningCopySheet = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("自由复制") }
+                    TextButton(
+                        onClick = {
+                            showReasoningActions = false
+                            showReasoningEditor = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("编辑") }
+                }
+            },
+            confirmButton = {},
+        )
+    }
+    if (showReasoningCopySheet) {
+        ChatMessageCopySheet(
+            message = message.copy(parts = listOf(UIMessagePart.Text(reasoningEditText))),
+            onDismissRequest = { showReasoningCopySheet = false },
+        )
+    }
+    if (showReasoningEditor && onEditReasoning != null) {
+        AlertDialog(
+            onDismissRequest = { showReasoningEditor = false },
+            title = { Text("编辑思考内容") },
+            text = {
+                OutlinedTextField(
+                    value = reasoningEditText,
+                    onValueChange = { reasoningEditText = it },
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                    minLines = 6,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onEditReasoning(reasoningEditText)
+                    showReasoningEditor = false
+                }) { Text(stringResource(R.string.confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReasoningEditor = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
 }
 
 // 思考链折叠时默认保留的尾部步骤数
@@ -327,6 +401,7 @@ private fun MessagePartsBlock(
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
+    onEditReasoning: (() -> Unit)? = null,
     cardHost: CardHostContext? = null,
     cardMessagesJson: String = "[]",
 ) {
@@ -424,6 +499,7 @@ private fun MessagePartsBlock(
                                         model = model,
                                         assistant = assistant,
                                         collapsedAdaptiveWidth = isReasoningOnlyBlock,
+                                        onEdit = onEditReasoning,
                                     )
                                 }
                             }

@@ -151,6 +151,7 @@ import me.rerere.rikkahub.data.model.toMergedMessageNode
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.withEditedReasoning
 import me.rerere.rikkahub.data.model.bindConfig
 import me.rerere.rikkahub.data.model.fillModelSnapshots
 import me.rerere.rikkahub.data.model.getAssistantOf
@@ -3052,6 +3053,17 @@ class ChatService(
             currentConversation.copy(messageNodes = updatedNodes),
             allowShrink = true,
         )
+    }
+
+    suspend fun editMessageReasoning(
+        conversationId: Uuid,
+        messageId: Uuid,
+        text: String,
+    ) {
+        val conversation = getConversationFlow(conversationId).value
+        val updatedNodes = conversation.messageNodes.map { it.withEditedReasoning(messageId, text) }
+        if (updatedNodes == conversation.messageNodes) return
+        saveConversation(conversationId, conversation.copy(messageNodes = updatedNodes))
     }
 
     suspend fun forkConversationAtMessage(

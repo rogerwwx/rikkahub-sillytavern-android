@@ -57,7 +57,9 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
     this.fastForEachIndexed { index, part ->
         when (part) {
             is UIMessagePart.Reasoning -> {
-                currentThinkingSteps.add(ThinkingStep.ReasoningStep(part))
+                if (part.reasoning.isNotBlank() || part.finishedAt == null) {
+                    currentThinkingSteps.add(ThinkingStep.ReasoningStep(part))
+                }
             }
 
             is UIMessagePart.Tool -> {

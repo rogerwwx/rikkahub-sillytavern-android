@@ -251,6 +251,12 @@ class ChatVM(
         }
     }
 
+    fun handleMessageReasoningEdit(text: String, messageId: Uuid) {
+        viewModelScope.launch {
+            chatService.editMessageReasoning(_conversationId, messageId, text)
+        }
+    }
+
     /**
      * MVU 变量按楼层写回：状态栏是逐楼快照，变量必须挂在消息上，
      * 卡片被回收重组后才能恢复当轮状态。

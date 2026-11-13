@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -129,6 +130,7 @@ private fun ReasoningContent(
     scrollState: ScrollState,
     fadeHeight: Float,
     loading: Boolean,
+    onEdit: (() -> Unit)?,
 ) {
     val reasoningRegexes = LocalSettings.current.allRegexesOf(assistant)
     // 流式期间不跑正则：每个 chunk 都全量替换会拖慢重组，生成结束后再处理一次
@@ -154,6 +156,12 @@ private fun ReasoningContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (onEdit != null) Modifier.combinedClickable(
+                    onClick = {},
+                    onLongClick = onEdit,
+                ) else Modifier
+            )
             .let { contentModifier ->
                 if (isPreview) {
                     contentModifier
@@ -194,7 +202,7 @@ private fun ReasoningContent(
         }
         // 流式生成期间不启用 SelectionContainer，避免 selectable 列表并发修改导致的
         // ConcurrentModificationException（详见 ChatMessage.kt 文本块同样处理）。
-        if (loading) {
+        if (loading || onEdit != null) {
             reasoningContent()
         } else {
             SelectionContainer {
@@ -211,6 +219,7 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
     assistant: Assistant?,
     fadeHeight: Float = 64f,
     collapsedAdaptiveWidth: Boolean = false,
+    onEdit: (() -> Unit)? = null,
 ) {
     val (state, loading) = rememberReasoningState(reasoning)
     val thinkingTitle = reasoning.reasoning.extractThinkingTitle()
@@ -220,6 +229,7 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
     ControlledChainOfThoughtStep(
         expanded = state.expandState == ReasoningCardState.Expanded,
         onExpandedChange = { state.onExpandedChange(it, loading) },
+        onLongClick = onEdit,
         icon = {
             Icon(
                 imageVector = HugeIcons.Idea01,
@@ -263,6 +273,7 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
                 scrollState = state.scrollState,
                 fadeHeight = fadeHeight,
                 loading = loading,
+                onEdit = onEdit,
             )
         },
     )

@@ -70,10 +70,21 @@ fun ChatMessageNerdLine(
     message: UIMessage,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
+    messageFloor: Int? = null,
 ) {
     val settings = LocalSettings.current
     val usage = message.usage
-    if (!settings.displaySetting.showTokenUsage || usage == null) return
+    if (!settings.displaySetting.showTokenUsage || usage == null) {
+        if (messageFloor != null) {
+            Text(
+                text = "第 $messageFloor 楼",
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                modifier = modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            )
+        }
+        return
+    }
 
     val stats = remember(message) { message.nerdStats(usage) }
     // 消息里的模型快照不带上下文窗口，只能从设置里按 ID 找；模型被删了就不显示窗口大小
@@ -106,6 +117,9 @@ fun ChatMessageNerdLine(
                         .clickable { scope.launch { tooltipState.show() } }
                         .padding(horizontal = 4.dp, vertical = 2.dp),
                 ) {
+                    if (messageFloor != null) {
+                        Text(text = "第 $messageFloor 楼")
+                    }
                     if (stats.steps > 1) {
                         StatsItem(
                             icon = { StatsIcon(HugeIcons.Repeat, stringResource(R.string.chat_message_usage_step_count)) },

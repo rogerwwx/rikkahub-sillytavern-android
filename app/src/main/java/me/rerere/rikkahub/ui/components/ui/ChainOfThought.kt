@@ -3,6 +3,7 @@ package me.rerere.rikkahub.ui.components.ui
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -256,6 +257,7 @@ interface ChainOfThoughtScope {
      * @param label 步骤标题区域
      * @param extra 标题右侧的附加信息
      * @param onClick 自定义点击行为；设置后优先于展开/折叠逻辑
+     * @param onLongClick 长按标题区域的行为
      * @param collapsedAdaptiveWidth 是否在折叠且内容隐藏时使用自适应宽度
      * @param contentVisible 是否展示内容区域，可与 [expanded] 解耦
      * @param content 步骤内容；为 `null` 时步骤不可展开
@@ -268,6 +270,7 @@ interface ChainOfThoughtScope {
         label: (@Composable () -> Unit),
         extra: (@Composable () -> Unit)? = null,
         onClick: (() -> Unit)? = null,
+        onLongClick: (() -> Unit)? = null,
         collapsedAdaptiveWidth: Boolean = false,
         contentVisible: Boolean = expanded,
         content: (@Composable () -> Unit)? = null,
@@ -306,6 +309,7 @@ private class ChainOfThoughtScopeImpl : ChainOfThoughtScope {
         label: @Composable (() -> Unit),
         extra: @Composable (() -> Unit)?,
         onClick: (() -> Unit)?,
+        onLongClick: (() -> Unit)?,
         collapsedAdaptiveWidth: Boolean,
         contentVisible: Boolean,
         content: @Composable (() -> Unit)?
@@ -320,6 +324,7 @@ private class ChainOfThoughtScopeImpl : ChainOfThoughtScope {
             onExpandedChange = onExpandedChange,
             contentVisible = contentVisible,
             content = content,
+            onLongClick = onLongClick,
         )
     }
 
@@ -333,7 +338,8 @@ private class ChainOfThoughtScopeImpl : ChainOfThoughtScope {
         expanded: Boolean,
         onExpandedChange: (Boolean) -> Unit,
         contentVisible: Boolean,
-        content: @Composable (() -> Unit)?
+        content: @Composable (() -> Unit)?,
+        onLongClick: (() -> Unit)? = null,
     ) {
         val hasContent = content != null
         val shouldFillMaxWidth = !collapsedAdaptiveWidth || contentVisible
@@ -358,7 +364,17 @@ private class ChainOfThoughtScopeImpl : ChainOfThoughtScope {
                         }
                     )
                     .then(
-                        if (onClick != null) {
+                        if (onLongClick != null) {
+                            Modifier
+                                .clip(MaterialTheme.shapes.small)
+                                .combinedClickable(
+                                    onClick = {
+                                        if (onClick != null) onClick()
+                                        else if (hasContent) onExpandedChange(!expanded)
+                                    },
+                                    onLongClick = onLongClick,
+                                )
+                        } else if (onClick != null) {
                             Modifier
                                 .clip(MaterialTheme.shapes.small)
                                 .clickable { onClick() }

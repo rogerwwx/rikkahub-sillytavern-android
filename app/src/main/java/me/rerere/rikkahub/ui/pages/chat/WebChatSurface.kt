@@ -29,6 +29,8 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.messageFloorNumbers
+import me.rerere.rikkahub.data.model.messageForDisplay
 import me.rerere.rikkahub.ui.components.richtext.MvuStore
 import me.rerere.rikkahub.ui.components.richtext.TrackWebViewPresence
 import me.rerere.ui.webview.WEB_VIEW_ASSET_URL
@@ -174,11 +176,20 @@ fun WebChatSurface(
         if (!streaming) null
         else messages.lastOrNull()?.takeIf { it.role == me.rerere.ai.core.MessageRole.ASSISTANT }
     }
-    val streamJson = remember(streamingMessage, assistant, settings) {
-        streamingMessage?.let { buildMessage(it, assistant, settings, iconText = iconText, labels = labels).toString() }
+    val messageFloors = remember(nodes) { nodes.messageFloorNumbers() }
+    val streamJson = remember(streamingMessage, assistant, settings, nodes, messageFloors) {
+        streamingMessage?.let { message ->
+            val node = nodes.find { it.currentMessage.id == message.id }
+            buildMessage(node?.messageForDisplay(message) ?: message, assistant, settings, iconText = iconText, labels = labels,
+                messageFloor = node?.id?.let { messageFloors[it] }).toString()
+        }
     }
-    val lastJson = remember(messages) {
-        messages.lastOrNull()?.let { buildMessage(it, assistant, settings, iconText = iconText, labels = labels).toString() }
+    val lastJson = remember(messages, nodes, messageFloors) {
+        messages.lastOrNull()?.let { message ->
+            val node = nodes.find { it.currentMessage.id == message.id }
+            buildMessage(node?.messageForDisplay(message) ?: message, assistant, settings, iconText = iconText, labels = labels,
+                messageFloor = node?.id?.let { messageFloors[it] }).toString()
+        }
     }
     // 下发时机只看渲染元数据：正文增长走流式增量，收藏/翻译/分支这类字段没有事件可依赖
     // 生成起止必须进 key：页面靠这次下发开关流式指示，漏掉就会挂在那儿不灭
@@ -194,6 +205,7 @@ fun WebChatSurface(
                 node?.messages?.size ?: 1,
                 message.translation?.hashCode() ?: 0,
                 message.parts.size,
+                if (message.id == streamingMessage?.id) 0 else message.parts.hashCode(),
             ).joinToString("|")
         } + "|" + streaming
     }

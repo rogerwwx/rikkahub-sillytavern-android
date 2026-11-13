@@ -1323,6 +1323,48 @@
     }
   }
 
+  function bindReasoningMenu(area) {
+    var timer = null;
+    var opened = false;
+    var startX = 0;
+    var startY = 0;
+    function cancel() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    }
+    function openMenu() {
+      cancel();
+      if (opened) return;
+      var row = area.closest('.row');
+      if (!row) return;
+      opened = true;
+      requestNative('messageAction', JSON.stringify({ action: 'reasoning_menu', id: String(row.dataset.id) }));
+    }
+    area.addEventListener('pointerdown', function (event) {
+      cancel();
+      opened = false;
+      if (event.button !== 0) return;
+      startX = event.clientX;
+      startY = event.clientY;
+      timer = setTimeout(openMenu, 500);
+    });
+    area.addEventListener('pointermove', function (event) {
+      if (Math.abs(event.clientX - startX) > 8 || Math.abs(event.clientY - startY) > 8) cancel();
+    });
+    area.addEventListener('pointerup', cancel);
+    area.addEventListener('pointercancel', cancel);
+    area.addEventListener('contextmenu', function (event) {
+      event.preventDefault();
+      openMenu();
+    });
+    area.addEventListener('click', function (event) {
+      if (!opened) return;
+      opened = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+  }
+
   function thinkStepNode(step, expanded) {
     var box = document.createElement('div');
     box.className = 'think-step';
@@ -1331,6 +1373,7 @@
       box.innerHTML = '<div class="think-step-head">' + REASONING_ICON +
         '<span class="step-label"></span>' + ARROW_ICON + '</div>' +
         '<div class="think-step-body"><div class="think-text"></div></div>';
+      bindReasoningMenu(box);
     } else {
       box.innerHTML = '<div class="think-step-head">' + toolIcon(step) +
         '<span class="ico tool-dot"><i></i><i></i><i></i></span>' +
@@ -1757,15 +1800,16 @@
   // 技术统计行：token / 缓存 / tok·s⁻¹ / 耗时（对齐 ChatMessageNerdLine）
   function syncNerd(node, msg) {
     if (!node) return;
+    var parts = [];
+    if (msg.floor != null) parts.push('<span class="item floor">第 ' + Number(msg.floor) + ' 楼</span>');
     if (state.appearance.showTokenUsage === false || !msg.usage) {
-      node.hidden = true;
-      node.textContent = '';
+      node.hidden = parts.length === 0;
+      node.innerHTML = parts.join('');
       return;
     }
     var usage = msg.usage;
     var cached = Number(usage.cached) || 0;
     var prompt = Number(usage.prompt) || 0;
-    var parts = [];
     parts.push('<span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V5"></path><path d="m6 11 6-6 6 6"></path></svg>' +
       formatNumber(prompt) + ' tokens' + (cached > 0 ? ' (' + formatNumber(cached) + ' cached' + (prompt > 0 ? ' / ' + Math.round(cached * 100 / prompt) + '%' : '') + ')' : '') + '</span>');
     parts.push('<span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v15"></path><path d="m6 13 6 6 6-6"></path></svg>' +
