@@ -53,7 +53,7 @@ fun SemanticDreamSettingsPage(id: String) {
             if (!assistant.semanticMemory.enabled) Text("语义记忆尚未启用。这些设置会保留，启用后才参与语义做梦；旧记忆设置独立保存。")
             SemanticMemorySection("自动做梦", HugeIcons.Moon02) {
                 DreamSwitch("自动做梦", config.automatic) { value -> change { it.copy(automatic = value) } }
-                Text("攒够完整轮数立即排队，否则空闲后排队；定期检查归纳与生命周期。Android 后台调度可能延后，无法保证严格时刻执行。",
+                Text("攒够完整轮数立即排队，否则空闲后排队；失败按指数退避自动重试，不做次数上限。Android 后台调度可能延后，无法保证严格时刻执行。",
                     style = MaterialTheme.typography.bodySmall)
                 DreamInt("累计完整轮数（1—1000）", config.minCompletedTurns, 1..1000) { value -> change { it.copy(minCompletedTurns = value) } }
                 DreamInt("空闲分钟（1—1440）", config.idleMinutes, 1..1440) { value -> change { it.copy(idleMinutes = value) } }
@@ -95,16 +95,13 @@ fun SemanticDreamSettingsPage(id: String) {
                     }
                 }
                 Text("实际支持的推理等级由所选模型决定；过高的推理预算可能占用输出预算，截断时不会提交草稿。", style = MaterialTheme.typography.bodySmall)
-                DreamInt("单次输入 token 预算（1024—128000）", config.maxInputTokens, 1024..128000) { value -> change { it.copy(maxInputTokens = value) } }
-                DreamInt("最大输出 token（256—32768）", config.maxOutputTokens, 256..32768) { value -> change { it.copy(maxOutputTokens = value) } }
+                Text("不限制输入输出 token：输入按原文轮次完整发送，输出由模型自身上限决定。",
+                    style = MaterialTheme.typography.bodySmall)
             }
-            SemanticMemorySection("分段与重试", HugeIcons.Database02) {
-                DreamInt("每次最多片段（1—50）", config.maxSegmentsPerRun, 1..50) { value -> change { it.copy(maxSegmentsPerRun = value) } }
-                DreamInt("时间分段空闲分钟（1—10080）", config.segmentGapMinutes, 1..10080) { value -> change { it.copy(segmentGapMinutes = value) } }
-                DreamSwitch("按消息日期分段", config.splitByDay) { value -> change { it.copy(splitByDay = value) } }
-                SemanticIntSlider("重叠完整轮数", config.overlapTurns, 0..10) { value -> change { it.copy(overlapTurns = value) } }
-                DreamInt("自动失败重试次数（0—5）", config.retryLimit, 0..5) { value -> change { it.copy(retryLimit = value) } }
-                DreamInt("重试初始退避秒（10—3600）", config.retryBackoffSeconds, 10..3600) { value -> change { it.copy(retryBackoffSeconds = value) } }
+            SemanticMemorySection("手动总结分块", HugeIcons.Database02) {
+                DreamInt("每块轮数（0 表示不分块）", config.manualChunkTurns, 0..500) { value -> change { it.copy(manualChunkTurns = value) } }
+                Text("只在手动总结时生效：用户消息加模型回复算一轮，按此轮数切块依次发送；填 0 则整段一次请求。自动做梦始终一次取全部待处理轮次。",
+                    style = MaterialTheme.typography.bodySmall)
             }
             SemanticMemorySection("记忆注入", HugeIcons.Brain02) {
                 SemanticInjectionSettings(config, change)

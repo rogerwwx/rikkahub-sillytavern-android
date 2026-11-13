@@ -20,6 +20,9 @@ data class SemanticJevCandidate(
     val protected: Boolean = false,
 )
 
+/** Jev 是可选辅助：材料一次发送，超过这个长度只回退基础结果，不截断也不影响主流程。 */
+private const val JEV_MAX_STATE_CHARS = 200_000
+
 class SemanticJevAssist(
     private val client: JevClient,
     private val repository: SemanticMemoryRepository,
@@ -50,8 +53,8 @@ class SemanticJevAssist(
         val event = try { start(assistantId, conversationId, "recall") }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法记录辅助诊断，使用基础召回"); return result }
-        if (state.toString().length > config.maxInputTokens) {
-            finish(event, candidates, candidates.map { it.id }.toSet(), decisions, answers, started, "判断材料超出单次输入预算，使用基础召回")
+        if (state.toString().length > JEV_MAX_STATE_CHARS) {
+            finish(event, candidates, candidates.map { it.id }.toSet(), decisions, answers, started, "判断材料过长，使用基础召回")
             return result
         }
         var failure: String? = null
@@ -108,9 +111,9 @@ class SemanticJevAssist(
         val event = try { start(assistantId, conversationId, "dream_review") }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法记录辅助诊断，使用基础草稿"); return candidates.map { it.id }.toSet() }
-        if (state.toString().length > config.maxInputTokens) {
+        if (state.toString().length > JEV_MAX_STATE_CHARS) {
             val keep = candidates.map { it.id }.toSet()
-            finish(event, candidates, keep, decisions, answers, started, "判断材料超出单次输入预算，使用基础草稿")
+            finish(event, candidates, keep, decisions, answers, started, "判断材料过长，使用基础草稿")
             return keep
         }
         var failure: String? = null

@@ -132,9 +132,6 @@ fun dreamHash(text: String): String = MessageDigest.getInstance("SHA-256").diges
     .joinToString("") { "%02x".format(it) }
 
 private fun DreamMessage.sourceHash() = snapshotHash
-private fun DreamMessage.sourceDay(): java.time.LocalDate = createdAtText?.let {
-    runCatching { java.time.LocalDate.parse(it.take(10)) }.getOrNull()
-} ?: java.time.Instant.ofEpochMilli(createdAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
 
 fun validDreamSources(sources: List<DreamSource>, messages: List<DreamMessage>): Boolean {
     var previousPosition = -1
@@ -173,74 +170,48 @@ private fun dreamTurns(messages: List<DreamMessage>, includeIncomplete: Boolean)
     return turns
 }
 
-/** 完整轮次优先；单轮超预算时保存消息内偏移，不丢掉剩余正文。 */
+/** 完整轮次优先；不做 token 切分，只按调用方给的轮数上限取整轮。 */
 fun dreamWindow(
     conversationId: String, messages: List<DreamMessage>, cursor: DreamCursor,
-    charBudget: Int, overlapTurns: Int, segmentGapMinutes: Int = 180, splitByDay: Boolean = true,
-    messageOverhead: Int = 0,
+    maxTurns: Int = 0, overlapTurns: Int = 1,
     firstPosition: Int = 0, lastPosition: Int = messages.lastIndex,
     includeIncomplete: Boolean = false,
 ): DreamWindow? {
-    require(charBudget > 0)
     val stableCursor = stableDreamCursor(messages, cursor)
-    val validPrefix = stableCursor.processed
+    val consumed = stableCursor.processed.groupBy { it.messageId }.mapValues { (_, sources) -> sources.maxOf { it.end } }
     val turns = dreamTurns(messages, includeIncomplete)
-    val consumed = validPrefix.groupBy { it.messageId }.mapValues { (_, sources) -> sources.maxOf { it.end } }
     val pending = turns.map { turn ->
         if (includeIncomplete) turn.filter { it.index in firstPosition..lastPosition } else turn
     }.filter { turn -> turn.isNotEmpty() && turn.first().index >= firstPosition && turn.last().index <= lastPosition &&
         turn.any { (consumed[it.value.messageId] ?: 0) < it.value.text.length } }
     if (pending.isEmpty()) return null
     val evidence = mutableListOf<DreamSource>()
-    var remaining = charBudget
-    var completed = 0
-    val firstMessage = pending.first().first().value
-    val firstTime = firstMessage.createdAt
-    var previousTime = firstTime
-    for (turn in pending) {
-        val time = turn.first().value.createdAt
-        if (evidence.isNotEmpty() && ((splitByDay && turn.first().value.sourceDay() != firstMessage.sourceDay()) ||
-                    time - previousTime > segmentGapMinutes.toLong() * 60000)) break
-        val size = turn.sumOf { val textSize = (it.value.text.length - (consumed[it.value.messageId] ?: 0)).coerceAtLeast(0)
-            if (textSize == 0) 0 else textSize + messageOverhead }
-        if (evidence.isNotEmpty() && size > remaining) break
+    val selected = if (maxTurns <= 0) pending else pending.take(maxTurns)
+    for (turn in selected) {
         for ((position, message) in turn) {
             val start = consumed[message.messageId] ?: 0
-            if (start >= message.text.length || remaining <= messageOverhead) continue
-            var end = (start + remaining - messageOverhead).coerceAtMost(message.text.length)
-            if (end < message.text.length && end > start && message.text[end - 1].isHighSurrogate()) end--
-            if (end == start) break
+            if (start >= message.text.length) continue
             evidence += DreamSource(conversationId, message.nodeId, message.messageId, position, message.sourceHash(),
-                message.role, message.createdAt, start, end, createdAtText = message.createdAtText,
+                message.role, message.createdAt, start, message.text.length, createdAtText = message.createdAtText,
                 isIncomplete = !message.finished)
-            remaining -= end - start + messageOverhead
         }
-        if (size <= charBudget && remaining >= 0 && turn.all { item ->
-                (evidence.lastOrNull { it.messageId == item.value.messageId }?.end ?: consumed[item.value.messageId] ?: 0) >= item.value.text.length
-            }) completed++
-        previousTime = time
-        if (remaining == 0 || size > charBudget) break
     }
     if (evidence.isEmpty()) return null
     val firstPosition = evidence.first().position
     val partial = evidence.first().takeIf { it.start > 0 }?.let { source ->
-        val start = (source.start - minOf(500, charBudget / 8)).coerceAtLeast(0)
+        val start = (source.start - 500).coerceAtLeast(0)
         "[同一消息已处理前段，仅理解]\n" + messages[source.position].text.substring(start, source.start)
     }.orEmpty()
-    val contextTurns = mutableListOf<String>()
-    var contextSize = partial.length
-    for (turn in turns.filter { it.last().index < firstPosition }.takeLast(overlapTurns.coerceAtLeast(0)).asReversed()) {
-        val text = turn.joinToString("\n") { "[理解材料 ${it.value.role}] ${it.value.text}" }
-        if (contextSize + text.length > charBudget / 4) break
-        contextTurns.add(0, text)
-        contextSize += text.length
-    }
-    val context = (contextTurns + partial.takeIf { it.isNotBlank() }.orEmpty()).filter { it.isNotBlank() }.joinToString("\n")
+    val context = (turns.filter { it.last().index < firstPosition }.takeLast(overlapTurns.coerceAtLeast(0)).asReversed()
+        .map { turn -> turn.joinToString("\n") { "[理解材料 " + it.value.role + "] " + it.value.text } } + partial)
+        .filter { it.isNotBlank() }.joinToString("\n")
     val transcript = evidence.joinToString("\n") { source ->
-        "[新证据 id=${source.evidenceId} role=${source.role} messageDate=${source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)} offset=${source.start}:${source.end}${if (source.isIncomplete) " state=未确认正常完成" else ""}]\n" +
+        "[新证据 id=" + source.evidenceId + " role=" + source.role + " messageDate=" +
+            (source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)) +
+            " offset=" + source.start + ":" + source.end + (if (source.isIncomplete) " state=未确认正常完成" else "") + "]\n" +
             messages[source.position].text.substring(source.start, source.end)
     }
-    return DreamWindow(evidence, context, transcript, mergeDreamCoverage(messages, stableCursor, evidence), completed)
+    return DreamWindow(evidence, context, transcript, mergeDreamCoverage(messages, stableCursor, evidence), selected.size)
 }
 
 fun dreamExpiry(type: String, isCore: Boolean, evidenceAt: Long, ttlDays: Map<String, Int>): Long? =

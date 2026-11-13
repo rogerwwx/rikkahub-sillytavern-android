@@ -16,14 +16,13 @@ class SemanticDreamWorker(context: Context, params: WorkerParameters) : Coroutin
         val conversationId = inputData.getString("conversationId")
         val scheduler = GlobalContext.get().get<SemanticDreamScheduler>()
         val status = scheduler.runScheduled(assistantId, hash, periodic, manual, conversationId)
-        // PeriodicWorkRequest 的周期不能当作失败重试；后续片段另建有界一次任务。
-        if (periodic && status == "pending") {
+        // 还有待处理片段或失败退避未到：按持久 dueAt 重新排一次，不走 WorkManager 自己的重试。
+        if (status == "pending") {
             val state = scheduler.load(assistantId, conversationId)
-            schedule(applicationContext, assistantId, hash, state?.dueAt?.minus(System.currentTimeMillis()) ?: 30000,
-                conversationId = conversationId)
-            return Result.success()
+            schedule(applicationContext, assistantId, hash, state?.dueAt?.minus(System.currentTimeMillis()) ?: 30_000L,
+                manual = manual, conversationId = conversationId)
         }
-        return if (status == "pending") Result.retry() else Result.success()
+        return Result.success()
     }
 
     companion object {

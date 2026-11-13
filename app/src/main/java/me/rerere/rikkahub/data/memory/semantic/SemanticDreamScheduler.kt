@@ -75,7 +75,8 @@ class SemanticDreamScheduler(
             val (_, hash) = current(id) ?: return@forEach
             val states = states(id)
             if (states.isEmpty()) enqueue(id, hash, "startup", 0)
-            else states.filter { it.status in setOf("pending", "running") }.forEach { state ->
+            // 失败状态也要重启：窗口里还有待处理历史时会继续自动重试。
+            else states.filter { it.status in setOf("pending", "running", "failed") }.forEach { state ->
                 val recovered = state.copy(status = "pending")
                 put(recovered)
                 SemanticDreamWorker.schedule(context, id, hash, recovered.dueAt - System.currentTimeMillis(),
@@ -156,7 +157,7 @@ class SemanticDreamScheduler(
                     put(latest.copy(status = "pending"))
                     return@withTransaction "pending"
                 }
-                val next = latest.afterRun(result.status, System.currentTimeMillis(), config, result.error)
+                val next = latest.afterRun(result.status, System.currentTimeMillis(), result.error)
                 put(next)
                 next.status
             }
@@ -169,7 +170,7 @@ class SemanticDreamScheduler(
         } catch (_: Exception) {
             val latest = load(assistantId, conversationId) ?: return "failed"
             if (latest.configurationHash != hash || latest.status == "cancelled") return "cancelled"
-            val next = latest.afterRun("failed", System.currentTimeMillis(), config, "做梦运行失败；来源窗口保留")
+            val next = latest.afterRun("failed", System.currentTimeMillis(), "做梦运行失败，稍后自动重试")
             put(next)
             return next.status
         } finally { hold.close() }

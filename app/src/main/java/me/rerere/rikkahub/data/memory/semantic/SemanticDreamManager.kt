@@ -42,6 +42,8 @@ data class SemanticDreamRunState(
     val nextRetryAt: Long = 0, val error: String? = null, val evidence: List<DreamSource> = emptyList(),
     val changed: Int = 0,
     val operation: String = "reflection", val selectedIds: List<String> = emptyList(),
+    /** auto/periodic 由后台触发，manual/range 由用户点按触发。 */
+    val trigger: String = "auto",
 )
 
 @Serializable
@@ -115,10 +117,10 @@ class SemanticDreamManager(
 
     suspend fun pendingOf(conversation: Conversation): SemanticDreamPending? {
         val assistantId = conversation.assistantId.toString()
-        val settings = repository.assistantSettings(assistantId)?.takeIf { it.enabled } ?: return null
+        repository.assistantSettings(assistantId)?.takeIf { it.enabled } ?: return null
         val messages = conversation.dreamMessages()
         val cursor = cursor(assistantId, conversation.id.toString())
-        window(conversation.id.toString(), messages, cursor, settings) ?: return null
+        window(conversation.id.toString(), messages, cursor) ?: return null
         val count = dreamHistory(messages, cursor).pendingTurns
         return SemanticDreamPending(assistantId, conversation.id.toString(), count)
     }
@@ -184,7 +186,7 @@ class SemanticDreamManager(
         drainEmbedding(assistantId, conversationId)
         for (conversation in conversations(assistantId, conversationId)) {
             val before = segments
-            while (segments < settings.dream.maxSegmentsPerRun) {
+            while (true) {
                 currentCoroutineContext().ensureActive()
                 val result = process(assistantId, conversation.id.toString(), automatic) ?: break
                 segments += result.processedSegments
@@ -192,7 +194,6 @@ class SemanticDreamManager(
                 if (result.status != "completed") return@exclusive result.copy(processedSegments = segments, changed = changed)
             }
             if (automatic && segments > before) autoOrganize(assistantId, conversation.id.toString(), settings)
-            if (segments >= settings.dream.maxSegmentsPerRun) break
         }
         val remaining = conversations(assistantId, conversationId).any { hasPending(it) }
         SemanticDreamRun(if (remaining) "pending" else "completed", segments, changed)
@@ -200,10 +201,10 @@ class SemanticDreamManager(
 
     suspend fun runConversation(assistantId: String, conversationId: String): SemanticDreamRun = exclusive(assistantId, conversationId) {
         reconcileSources(assistantId, conversationId)
-        process(assistantId, conversationId, false) ?: SemanticDreamRun("completed")
+        process(assistantId, conversationId, false, trigger = "manual") ?: SemanticDreamRun("completed")
     }
 
-    /** 固定点击时的起止消息；任务每批有界执行，后续重试沿专用游标继续，成功证据同时并入自动游标。 */
+    /** 固定点击时的起止消息；手动总结按设置里的轮数分块，0 表示整段一次请求。 */
     suspend fun runRange(assistantId: String, conversationId: String, range: SemanticDreamRange): SemanticDreamRun =
         exclusive(assistantId, conversationId) {
             val settings = config(assistantId)
@@ -211,9 +212,9 @@ class SemanticDreamManager(
             maintainLifecycle(assistantId, conversationId)
             var segments = 0
             var changed = 0
-            while (segments < settings.dream.maxSegmentsPerRun) {
+            while (true) {
                 currentCoroutineContext().ensureActive()
-                val result = process(assistantId, conversationId, false, range) ?: break
+                val result = process(assistantId, conversationId, false, range, trigger = "range") ?: break
                 segments += result.processedSegments
                 changed += result.changed
                 if (result.status != "completed") return@exclusive result.copy(processedSegments = segments, changed = changed)
@@ -222,7 +223,7 @@ class SemanticDreamManager(
                 ?: error("当前对话已删除或移出助手")
             val positions = range.positions(snapshot.messages)
             val remaining = window(conversationId, snapshot.messages, cursor(assistantId, conversationId, range.id),
-                settings, positions, includeIncomplete = true) != null
+                positions, includeIncomplete = true, maxTurns = settings.dream.manualChunkTurns) != null
             SemanticDreamRun(if (remaining) "pending" else "completed", segments, changed)
         }
 
@@ -265,18 +266,14 @@ class SemanticDreamManager(
             conversationId = conversationId))
     }
 
-    private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor, config: SemanticMemorySettings,
-        positions: IntRange = 0..messages.lastIndex, includeIncomplete: Boolean = false): DreamWindow? {
-        // 提示词与衔接状态先占预算，余量分给新证据、重叠原文和旧事实；汉字按至少一个 token 保守计算。
-        val reserved = maxOf(1800, config.dream.reflectionSystemPrompt().length + 200) + cursor.continuity.length
-        val budget = (config.dream.maxInputTokens - reserved).coerceAtLeast(512) / 2
-        return dreamWindow(id, messages, cursor, budget, config.dream.overlapTurns,
-            config.dream.segmentGapMinutes, config.dream.splitByDay, messageOverhead = 180,
+    /** 不按 token 截断：自动做梦取全部待处理轮次，手动总结按用户填的轮数分块（0 不分块）。 */
+    private fun window(id: String, messages: List<DreamMessage>, cursor: DreamCursor,
+        positions: IntRange = 0..messages.lastIndex, includeIncomplete: Boolean = false,
+        maxTurns: Int = 0): DreamWindow? = dreamWindow(id, messages, cursor, maxTurns,
             firstPosition = positions.first, lastPosition = positions.last, includeIncomplete = includeIncomplete)
-    }
 
     private suspend fun process(assistantId: String, conversationId: String, automatic: Boolean,
-        range: SemanticDreamRange? = null): SemanticDreamRun? {
+        range: SemanticDreamRange? = null, trigger: String = if (automatic) "auto" else "manual"): SemanticDreamRun? {
         val config = config(assistantId)
         if (automatic && !config.dream.automatic) return SemanticDreamRun("cancelled")
         val snapshot = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId } ?: return null
@@ -284,8 +281,10 @@ class SemanticDreamManager(
         val oldCursor = cursor(assistantId, conversationId)
         val progressCursor = if (range == null) oldCursor else cursor(assistantId, conversationId, range.id)
         val positions = range?.positions(snapshot.messages) ?: (0..snapshot.messages.lastIndex)
-        val window = window(conversationId, snapshot.messages, progressCursor, config, positions,
-            includeIncomplete = range != null) ?: return null
+        // 自动做梦一次取全部待处理轮次；手动按设置里的分块轮数，0 表示整段一次请求。
+        val window = window(conversationId, snapshot.messages, progressCursor, positions,
+            includeIncomplete = range != null, maxTurns = if (automatic) 0 else config.dream.manualChunkTurns)
+            ?: return null
         val modelSettings = settingsStore.awaitLoaded()
         val stream = modelSettings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
             ?: error("助手已删除")
@@ -299,12 +298,11 @@ class SemanticDreamManager(
         val previous = repository.dao.getJob(runId)?.let { json.decodeFromString<SemanticDreamRunState>(it.payloadJson) }
         if (previous?.status == "completed") return SemanticDreamRun("failed", error = "运行已经提交但来源游标不匹配，请检查恢复来源")
         val now = System.currentTimeMillis()
-        if (automatic && previous != null && previous.attempts >= config.dream.retryLimit + 1)
-            return SemanticDreamRun("failed", error = previous.error ?: "达到重试上限，请手动重试")
-        if (automatic && previous != null && previous.nextRetryAt > now) return SemanticDreamRun("pending")
-        val state = SemanticDreamRunState(runId, conversationId, "running",
-            if (!automatic && previous?.status in setOf("failed", "cancelled")) 1 else (previous?.attempts ?: 0) + 1,
-            evidence = window.evidence)
+        // 同一片窗口的失败按指数退避一直重试，不做「达到上限就永久放弃」。
+        if (automatic && previous?.status == "failed" && previous.nextRetryAt > now) return SemanticDreamRun("pending")
+        val attempts = if (!automatic && previous?.status in setOf("failed", "cancelled")) 1 else (previous?.attempts ?: 0) + 1
+        val state = SemanticDreamRunState(runId, conversationId, "running", attempts,
+            evidence = window.evidence, trigger = trigger)
         putRun(assistantId, state)
         var committed = false
         var committedChanges = 0
@@ -316,17 +314,15 @@ class SemanticDreamManager(
             val core = repository.list(assistantId, conversationId).filter { it.isCore && it.status == "active" }.take(config.coreBudget)
             val candidates = (recalled + core).distinctBy { it.id }
             val systemPrompt = config.dream.reflectionSystemPrompt()
-            val reserved = maxOf(1800, systemPrompt.length + 200) + window.nextCursor.continuity.length
+            // 旧事实只用于比较，不做条数或长度截断；相关候选由召回与核心名额决定。
             val oldContext = candidates.joinToString("\n") {
                 val evidence = dreamSources(it).filter { source -> source.valid }.maxByOrNull { source -> source.createdAt }
                 "[旧事实 id=${it.id} version=${it.contentVersion} scope=${dreamMetadata(it)["scope"] ?: "unknown"} latestEvidence=${evidence?.createdAtText ?: evidence?.createdAt ?: "unknown"}] ${it.content}"
             }
-                .take((config.dream.maxInputTokens - reserved).coerceAtLeast(0) / 4)
             val input = "[上一片衔接状态，仅用于理解]\n${window.nextCursor.continuity}\n[重叠原文，仅用于理解]\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n${window.transcript}"
-            require(systemPrompt.length + input.length <= config.dream.maxInputTokens) { "当前输入预算不足以容纳提示、来源和完整材料，请缩短提示词或提高做梦输入预算" }
             val params = TextGenerationParams(model = model, temperature = config.dream.temperature.toFloat(),
                 reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
-                maxTokens = config.dream.maxOutputTokens, customHeaders = model.customHeaders,
+                customHeaders = model.customHeaders,
                 customBody = model.customBodies.withoutMemoryOverrides(), sessionId = runId)
             val response = usageRecorder.wrap(providerManager.getProviderByType(providerSetting),
                 UsageTag(UsageSource.MEMORY, Uuid.parse(assistantId), conversation.id))
@@ -386,14 +382,8 @@ class SemanticDreamManager(
             val durable = completedRun(runId)
             if (durable != null) return SemanticDreamRun("completed", 1, durable.changed, "内容已提交，后续向量状态可从待办查看")
             if (committed) return SemanticDreamRun("completed", 1, committedChanges, "内容已提交，向量待办保留")
-            val safe = when (error) {
-                is me.rerere.ai.ui.IncompleteStreamException -> error.message ?: "流未完整完成"
-                is kotlinx.serialization.SerializationException -> "结构化输出无效"
-                is IllegalArgumentException, is IllegalStateException -> error.message?.takeIf { it.length < 100 && !it.contains("http", true) } ?: "来源、配置或版本校验失败"
-                else -> "做梦请求失败（${error.javaClass.simpleName}）"
-            }
-            putRun(assistantId, state.copy(status = "failed", error = safe,
-                nextRetryAt = now + config.dream.retryBackoffSeconds.toLong() * 1000 * state.attempts))
+            val safe = dreamFailureText(error)
+            putRun(assistantId, state.copy(status = "failed", error = safe, nextRetryAt = now + retryDelay(attempts)))
             return SemanticDreamRun("failed", error = safe)
         }
     }
@@ -425,9 +415,11 @@ class SemanticDreamManager(
     suspend fun retryEmbedding(assistantId: String, conversationId: String) =
         exclusive(assistantId, conversationId) { drainEmbedding(assistantId, conversationId) }
 
+    /** 待办之外的活跃条目也补齐向量：不靠排队，每次做梦起手就把缺口补上。 */
     private suspend fun drainEmbedding(assistantId: String, conversationId: String? = null) {
         val settings = config(assistantId)
         if (settings.embeddingModelId == null) return
+        val base = runCatching { repository.fingerprint(settings) }.getOrNull() ?: return
         repository.dao.jobs(assistantId).filter {
             it.kind == "dream_embedding" && (conversationId == null || it.conversationId == conversationId)
         }.forEach { job ->
@@ -444,6 +436,21 @@ class SemanticDreamManager(
             if (remaining.isEmpty()) repository.dao.deleteJob(job.id)
             else repository.dao.putJob(job.copy(payloadJson = json.encodeToString(DreamEmbeddingTodo(remaining,
                 todo.hashes.filterKeys { it in remaining }, errors)), updatedAt = System.currentTimeMillis()))
+        }
+        // 兜底扫描：本次窗口里所有该有向量却没有的活跃条目，一并补上，避免长期留一小撮未向量化。
+        val now = System.currentTimeMillis()
+        val missing = scopedMemories(assistantId, conversationId).filter {
+            it.status == "active" && (it.isCore || it.expiresAt == null || it.expiresAt > now) &&
+                !repository.validVector(it, base, settings.dimensions)
+        }
+        if (missing.isEmpty()) return
+        runCatching {
+            missing.groupBy { it.conversationId }.forEach { (target, entries) ->
+                entries.map { it.id }.chunked(50).forEach { ids ->
+                    repository.embed(assistantId, target, ids, settings, "dream",
+                        expectedVersions = entries.filter { it.id in ids }.associate { it.id to it.contentVersion })
+                }
+            }
         }
     }
 
@@ -518,7 +525,7 @@ class SemanticDreamManager(
 
     suspend fun organize(assistantId: String, conversationId: String, ids: List<String>): SemanticDreamRun = exclusive(assistantId, conversationId) {
         reconcileSources(assistantId, conversationId)
-        organizeSelected(assistantId, conversationId, ids)
+        organizeSelected(assistantId, conversationId, ids, automatic = false)
     }
 
     private suspend fun autoOrganize(assistantId: String, conversationId: String, config: SemanticMemorySettings) {
@@ -530,16 +537,8 @@ class SemanticDreamManager(
             (it.expiresAt == null || it.expiresAt > System.currentTimeMillis()) && dreamMetadata(it)["origin"]?.jsonPrimitive?.contentOrNull == "dream" }
         val group = candidates.groupBy { it.type to (dreamMetadata(it)["scope"]?.jsonPrimitive?.contentOrNull ?: "user") }
             .values.firstOrNull { it.size >= config.dream.consolidationMinCandidates } ?: return
-        val bounded = mutableListOf<SemanticMemoryEntity>()
-        var size = 0
-        for (memory in group.sortedBy { it.createdAt }) {
-            if (size + memory.content.length + 120 >= config.dream.maxInputTokens / 2) break
-            bounded += memory
-            size += memory.content.length + 120
-        }
-        if (bounded.size < config.dream.consolidationMinCandidates) return
         try {
-            val result = organizeSelected(assistantId, conversationId, bounded.map { it.id })
+            val result = organizeSelected(assistantId, conversationId, group.map { it.id }, automatic = true)
             if (result.status == "completed") repository.dao.putJob(SemanticJobEntity(checkpoint, assistantId,
                 "dream_organize_checkpoint", successful.toString(), conversationId = conversationId))
         } catch (cancel: CancellationException) { throw cancel }
@@ -550,7 +549,8 @@ class SemanticDreamManager(
         }
     }
 
-    private suspend fun organizeSelected(assistantId: String, conversationId: String, ids: List<String>): SemanticDreamRun {
+    private suspend fun organizeSelected(assistantId: String, conversationId: String, ids: List<String>,
+        automatic: Boolean): SemanticDreamRun {
         val config = config(assistantId)
         val selected = ids.distinct().map { repository.get(assistantId, conversationId, it) ?: error("所选条目不在当前窗口或已删除") }
         require(selected.size >= 2) { "请至少选择两条同主题记忆" }
@@ -559,16 +559,15 @@ class SemanticDreamManager(
         val scopes = selected.map { dreamMetadata(it)["scope"]?.jsonPrimitive?.contentOrNull ?: "user" }.distinct()
         require(scopes.size == 1) { "不同适用范围的记忆不能合并" }
         val input = selected.joinToString("\n") { "id=${it.id} version=${it.contentVersion} type=${it.type}: ${it.content}" }
-        require(input.length < config.dream.maxInputTokens / 2) { "所选条目超出单组预算，请按主题减少选择" }
         val systemPrompt = config.dream.consolidationSystemPrompt()
-        require(systemPrompt.length + input.length <= config.dream.maxInputTokens) { "当前输入预算不足以容纳提示和所选记忆，请缩短提示词或提高做梦输入预算" }
         val settings = settingsStore.awaitLoaded()
         val stream = settings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
             ?: error("助手已删除")
         val model = (config.dream.modelId ?: settings.chatModelId)?.let(settings::findModelById) ?: error("做梦模型失效")
         val provider = model.findProvider(settings.providers)?.takeIf { it.enabled }?.copyProvider() ?: error("做梦提供商失效")
         val runId = "dream_organize:" + Uuid.random().toString()
-        val state = SemanticDreamRunState(runId, conversationId, "running", attempts = 1, operation = "organize", selectedIds = selected.map { it.id })
+        val state = SemanticDreamRunState(runId, conversationId, "running", attempts = 1, operation = "organize",
+            selectedIds = selected.map { it.id }, trigger = if (automatic) "auto" else "manual")
         putRun(assistantId, state)
         var committed = false
         var changed = 0
@@ -576,7 +575,7 @@ class SemanticDreamManager(
         val response = usageRecorder.wrap(providerManager.getProviderByType(provider),
             UsageTag(UsageSource.MEMORY, Uuid.parse(assistantId), Uuid.parse(conversationId)))
             .generateTextComplete(provider, listOf(UIMessage.system(systemPrompt), UIMessage.user(input)),
-                TextGenerationParams(model, temperature = config.dream.temperature.toFloat(), maxTokens = config.dream.maxOutputTokens,
+                TextGenerationParams(model, temperature = config.dream.temperature.toFloat(),
                     reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
                     customHeaders = model.customHeaders, customBody = model.customBodies.withoutMemoryOverrides(), sessionId = runId), stream)
         val groups = Json.decodeFromString<DreamOrganizeDraft>(cleanDreamJson(response.message.toText()))
@@ -629,12 +628,13 @@ class SemanticDreamManager(
         } catch (cancel: CancellationException) {
             if (!committed) preserveOrCancel(assistantId, state, "整理取消，原集合保留")
             throw cancel
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             val durable = completedRun(runId)
             if (durable != null) return SemanticDreamRun("completed", 1, durable.changed, "整理已提交，后续向量状态可从待办查看")
             if (committed) return SemanticDreamRun("completed", 1, changed, "整理已提交，向量待办保留")
-            putRun(assistantId, state.copy(status = "failed", error = "整理失败或校验未通过，原集合保留"))
-            return SemanticDreamRun("failed", error = "整理失败或校验未通过，原集合保留")
+            val safe = dreamFailureText(error)
+            putRun(assistantId, state.copy(status = "failed", error = safe))
+            return SemanticDreamRun("failed", error = safe)
         }
     }
 }
@@ -652,4 +652,43 @@ internal fun Conversation.dreamMessages(): List<DreamMessage> = messageNodes.dia
         message.role == MessageRole.USER || (message.getTools().all { it.isExecuted } &&
             (message.generationCompletion == null || (message.finishedAt != null && message.generationCompletion == StreamCompletion.NORMAL))),
         createdAtText = message.createdAt.toString())
+}
+
+/** 失败的自动重试退避：30 秒起指数增长，封顶 30 分钟；不设「永久放弃」。 */
+private fun retryDelay(attempts: Int): Long =
+    (30_000L shl (attempts - 1).coerceIn(0, 6)).coerceAtMost(30 * 60_000L)
+
+private val httpStatus = Regex("""Failed to get [a-z ]*:? ?(\d{3})""")
+private val bareStatus = Regex("""\b(?:HTTP|status)[ =:]*([1-5]\d{2})\b""", RegexOption.IGNORE_CASE)
+
+/** 界面和诊断只见可读原因：HTTP 失败带状态码，其它保留自身校验说明。 */
+internal fun dreamFailureText(error: Throwable): String {
+    val raw = error.message.orEmpty().trim()
+    val statusMatch = httpStatus.find(raw) ?: bareStatus.find(raw)
+    val status = statusMatch?.groupValues?.get(1)
+    val reason = httpReason(raw, statusMatch?.groups?.get(1)?.range)
+    if (status != null) return "请求失败 HTTP " + status + (if (reason.isBlank()) "" else "：" + reason)
+    return when (error) {
+        is me.rerere.ai.ui.IncompleteStreamException -> raw.ifBlank { "流未完整完成，已放弃本次草稿" }
+        is kotlinx.serialization.SerializationException ->
+            "模型输出不是有效的结构化结果，将自动重试" + (if (reason.isBlank()) "" else "：" + reason)
+        is IllegalArgumentException, is IllegalStateException ->
+            raw.takeIf { it.isNotBlank() && it.length <= 120 && !it.contains("http", true) } ?: "来源、配置或版本校验失败"
+        else -> "请求失败（" + error.javaClass.simpleName + "）"
+    }
+}
+
+/** 从错误响应里取一句可读原因；带状态码时只保留状态码之后的那段。 */
+private fun httpReason(raw: String, statusAt: IntRange?): String {
+    val body = (statusAt?.let { raw.substring(it.last + 1) } ?: raw).trim().trimStart(':', '-', ' ')
+    val message = runCatching {
+        val obj = kotlinx.serialization.json.Json.parseToJsonElement(body) as? kotlinx.serialization.json.JsonObject
+        val inner = obj?.get("error") as? kotlinx.serialization.json.JsonObject
+        (inner?.get("message") ?: obj?.get("message") ?: obj?.get("detail"))?.let {
+            (it as? kotlinx.serialization.json.JsonPrimitive)?.content
+        }
+    }.getOrNull()
+    return (message ?: body).lineSequence().joinToString(" ")
+        .replace(Regex("""(sk-|Bearer )[A-Za-z0-9._-]+"""), "***")
+        .take(90).trim()
 }

@@ -22,15 +22,16 @@ data class SemanticDreamScheduleState(
             attempts = 0, status = "pending", error = null, manualRange = null)
     }
 
-    fun afterRun(runStatus: String, now: Long, config: SemanticDreamSettings, failure: String?): SemanticDreamScheduleState = when (runStatus) {
+    /** 失败只更新退避时间，不写死成终止状态：同一片窗口会继续自动重试。 */
+    fun afterRun(runStatus: String, now: Long, failure: String?): SemanticDreamScheduleState = when (runStatus) {
         "completed" -> copy(status = "completed", attempts = 0, lastCompletedAt = now, error = null)
         "cancelled" -> copy(status = "cancelled", error = "做梦已取消")
-        "pending" -> copy(status = "pending", dueAt = now + config.retryBackoffSeconds * 1000L, error = null)
+        "pending" -> copy(status = "pending", dueAt = now + 30_000L, error = null)
         else -> {
             val failures = attempts + 1
-            copy(status = if (failures > config.retryLimit) "failed" else "pending", attempts = failures,
-                dueAt = now + (config.retryBackoffSeconds * 1000L * (1L shl (failures - 1).coerceIn(0, 5))).coerceAtMost(3_600_000L),
-                error = failure ?: "做梦失败，来源窗口已保留")
+            copy(status = "pending", attempts = failures,
+                dueAt = now + (30_000L shl (failures - 1).coerceIn(0, 6)).coerceAtMost(30 * 60_000L),
+                error = failure ?: "做梦失败，稍后自动重试")
         }
     }
 }
