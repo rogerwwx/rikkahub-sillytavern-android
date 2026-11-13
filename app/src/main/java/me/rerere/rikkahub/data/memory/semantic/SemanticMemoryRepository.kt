@@ -247,7 +247,11 @@ class SemanticMemoryRepository(
         results
     }
 
-    suspend fun recall(assistantId: String, conversationId: String, query: String, settings: SemanticMemorySettings): SemanticRecallResult =
+    /**
+     * [sideEffects] 为 false 时只读取，不累计召回次数（界面召回测试、预览不该污染真实统计）。
+     */
+    suspend fun recall(assistantId: String, conversationId: String, query: String, settings: SemanticMemorySettings,
+        sideEffects: Boolean = true): SemanticRecallResult =
         withContext(Dispatchers.IO) {
             val start = System.nanoTime()
             beforeRecall?.invoke(assistantId, conversationId)
@@ -378,7 +382,7 @@ class SemanticMemoryRepository(
                     put("degraded", degraded.joinToString("；"))
                     filters.forEach { (key, count) -> put(key, count) }
                 }.toString(), error = degraded.takeIf { it.isNotEmpty() }?.joinToString("；")))
-                if (hits.isNotEmpty()) dao.recordAccess(assistantId, conversationId, hits.map { it.memory.id }, now)
+                if (sideEffects && hits.isNotEmpty()) dao.recordAccess(assistantId, conversationId, hits.map { it.memory.id }, now)
                 result
             } catch (error: CancellationException) {
                 withContext(NonCancellable) { dao.putEvent(event.copy(status = "cancelled", durationNanos = System.nanoTime() - start)) }

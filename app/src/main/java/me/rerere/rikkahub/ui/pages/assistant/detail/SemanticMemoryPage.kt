@@ -469,6 +469,10 @@ private fun SemanticMemoryRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(relativeTime(memory.updatedAt), style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline)
+                if (memory.accessCount > 0) {
+                    Text("召回 " + memory.accessCount + " 次", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
                 memory.expiresAt?.let {
                     Text("到期 " + relativeTime(it), style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline)
@@ -1038,7 +1042,8 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                             Text(result.hits.size.toString() + " 条命中 · " +
                                 "%.1f".format(result.durationNanos / 1_000_000.0) + " ms",
                                 style = MaterialTheme.typography.labelMedium)
-                            Text("候选 BM25 " + result.lexicalCandidates + " · 向量 " + result.vectorCandidates,
+                            Text("候选 BM25 " + result.lexicalCandidates + " · 向量 " + result.vectorCandidates +
+                                result.filters["jev_rerank_pool"]?.let { " · Jev 重排 " + it + " 条" }.orEmpty(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             result.degraded.forEach {

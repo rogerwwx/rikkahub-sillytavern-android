@@ -19,6 +19,7 @@ class SemanticMemoryVM(
     private val context: Context,
     private val dreamManager: SemanticDreamManager,
     private val dreamScheduler: SemanticDreamScheduler,
+    private val jevAssist: SemanticJevAssist,
 ) : ViewModel() {
     private val maintenance = SemanticMaintenanceManager(repository)
     private val transfers = SemanticTransferManager(repository)
@@ -122,11 +123,13 @@ class SemanticMemoryVM(
         refreshDiagnostics()
     }
 
+    /** 召回测试只读取，不累计召回次数；开启 Jev 时展示重排后的结果，与真实注入保持一致。 */
     fun testRecall() = action {
         val text = recallQuery.value.trim()
         require(text.isNotBlank()) { "请输入召回查询" }
         val config = repository.assistantSettings(assistantId) ?: error("助手不存在")
-        recallResult.value = repository.recall(assistantId, conversationId, text, config)
+        val base = repository.recall(assistantId, conversationId, text, config, sideEffects = false)
+        recallResult.value = jevAssist.rerankRecall(assistantId, conversationId, text, "", config, base)
         refreshDiagnostics()
     }
 
