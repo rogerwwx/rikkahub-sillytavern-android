@@ -313,6 +313,7 @@
   <string name="chat_page_compress_additional_prompt">Additional Instructions (Optional)</string>
   <string name="chat_page_compress_additional_prompt_hint">Specify what to preserve or focus on</string>
   <string name="chat_page_compress_context">Compress History</string>
+  <string name="chat_page_compress_context_message_count">Context: %d messages</string>
   <string name="chat_page_compress_context_desc">Compress the conversation into a summary to save tokens</string>
   <string name="chat_page_compress_history_compat">Option 1: Original conversation roles</string>
   <string name="chat_page_compress_history_compat_desc">Send the complete selected records with their original user/assistant roles, add two rounds of dot buffers, then put only the compression instructions in the final message. Off by default, for this compression only.</string>

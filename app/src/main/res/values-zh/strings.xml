@@ -313,6 +313,7 @@
   <string name="chat_page_compress_additional_prompt">附加说明（可选）</string>
   <string name="chat_page_compress_additional_prompt_hint">指定要保留或关注的内容</string>
   <string name="chat_page_compress_context">压缩历史</string>
+  <string name="chat_page_compress_context_message_count">上下文 %d 条</string>
   <string name="chat_page_compress_context_desc">将对话压缩为摘要以节省令牌</string>
   <string name="chat_page_compress_history_compat">方案 1：按原角色发送历史</string>
   <string name="chat_page_compress_history_compat_desc">按原 user／assistant 身份完整发送选中的记录，接两轮点号缓冲，末条消息只放压缩指令。默认关闭，仅对本次压缩生效。</string>

@@ -292,9 +292,10 @@ internal fun FilesPicker(
                             )
                         },
                         trailingContent = {
-                            if (conversation.messageNodes.isNotEmpty()) {
+                            val contextMessageCount = conversation.currentMessages.size
+                            if (contextMessageCount > 0) {
                                 Text(
-                                    text = stringResource(R.string.chat_page_message_count, conversation.messageNodes.size),
+                                    text = stringResource(R.string.chat_page_compress_context_message_count, contextMessageCount),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
