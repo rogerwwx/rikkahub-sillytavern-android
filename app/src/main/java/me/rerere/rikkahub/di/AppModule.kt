@@ -33,7 +33,7 @@ val appModule = module {
     }
 
     viewModel { (id: String) ->
-        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticDreamSettingsVM(id, get(), get(), get())
+        me.rerere.rikkahub.ui.pages.assistant.detail.SemanticDreamSettingsVM(id, get(), get())
     }
 
     single {

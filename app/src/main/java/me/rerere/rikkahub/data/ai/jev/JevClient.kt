@@ -262,12 +262,11 @@ class JevClient(
 
     companion object {
         /**
-         * 官方没有"问题数量"上限，真正的约束是 64k token/请求。
-         * 这里设一个保守上限防止一次请求铺得太开，超了要分批。
+         * 项目自身的保守分批上限；实际上下文上限由所选模型决定。
          */
         const val JEV_MAX_QUESTIONS = 32
 
-        /** 官方请求体上限；分批按真实序列化长度计算，不按字符数估算。 */
+        /** 项目自身的保守请求预算；官方当前上限为 32 MiB，分批按实际序列化字节数计算。 */
         const val JEV_MAX_REQUEST_BYTES = 64 * 1024
 
         private const val JEV_BACKOFF_CAP_MS = 5_000L

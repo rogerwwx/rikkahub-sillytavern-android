@@ -770,7 +770,7 @@ private fun SemanticDreamPanel(
         CardGroup(modifier = Modifier.fillMaxWidth(), title = { Text("设置") }) {
             item(
                 onClick = openSettings,
-                headlineContent = { Text("模型、自动做梦、生命周期与 Jev") },
+                headlineContent = { Text("模型、自动做梦与生命周期") },
                 supportingContent = { Text("整理入口在管理页：长按多选后点底栏「更多」") },
                 leadingContent = { CardGroupIcon(HugeIcons.Settings03) },
                 trailingContent = { Icon(HugeIcons.ArrowRight01, contentDescription = null, modifier = Modifier.size(18.dp)) },
@@ -870,6 +870,33 @@ private fun SemanticSettingsPanel(
             SemanticInjectionSettings(config.dream) { transform ->
                 configure { old -> old.copy(dream = transform(old.dream)) }
             }
+        }
+        SemanticMemorySection("Jev 召回重排", HugeIcons.AiMagic) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("启用 Jev 重排", Modifier.weight(1f))
+                Switch(
+                    checked = config.dream.jevEnabled && config.dream.jevRecall,
+                    onCheckedChange = { enabled -> configure { old ->
+                        old.copy(dream = old.dream.copy(jevEnabled = enabled, jevRecall = enabled))
+                    } },
+                )
+            }
+            Text("按记忆对本轮角色扮演的帮助程度评分，考虑人物关系、共同经历、偏好与剧情连续性。沿用上方的核心优先名额，最多取 TopK 条供聊天或做梦使用。",
+                style = MaterialTheme.typography.bodySmall)
+            if (config.dream.jevEnabled && config.dream.jevRecall) {
+                NumberSetting("重排候选条数（1—100）", config.dream.jevCandidateCount.toString()) { raw ->
+                    raw.toIntOrNull()?.takeIf { it in 1..100 }?.let { value ->
+                        configure { old -> old.copy(dream = old.dream.copy(jevCandidateCount = value)) }
+                    }
+                }
+                NumberSetting("重排超时（毫秒，250—10000）", config.dream.jevTimeoutMillis.toString()) { raw ->
+                    raw.toIntOrNull()?.takeIf { it in 250..10000 }?.let { value ->
+                        configure { old -> old.copy(dream = old.dream.copy(jevTimeoutMillis = value)) }
+                    }
+                }
+            }
+            Text("连接在「设置 → 华灯 → Jev」配置。超时或评分失败时使用原召回结果；运行记录见「诊断」。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         SemanticMemorySection("高级检索", HugeIcons.Settings03) {
             SemanticIntSlider("候选倍率", config.candidateMultiplier, 1..10) { value ->
@@ -1013,6 +1040,10 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
     val recentError = report.errors.firstOrNull()
     val belowSimilarity = report.filters["below_similarity"] ?: 0
     val invalidVector = report.filters["invalid_vector"] ?: 0
+    val rerankEvents = remember(events) {
+        events.filter { it.operation == "jev" && it.purpose == "recall_rerank" }
+            .sortedByDescending { it.startedAt }.take(5)
+    }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp)) {
         item {
@@ -1096,6 +1127,22 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                         recentError?.let {
                             StatRow("最近错误", it.error.orEmpty().take(60), tint = MaterialTheme.colorScheme.error)
                         }
+                    }
+                }
+            }
+        }
+        if (rerankEvents.isNotEmpty()) {
+            item {
+                CardGroup(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    title = { Text("最近 Jev 重排") }) {
+                    rerankEvents.forEach { event ->
+                        item(
+                            headlineContent = { Text(relativeTime(event.startedAt) + " · " + statusLabel(event.status)) },
+                            supportingContent = {
+                                Text(if (event.detailJson.isBlank()) event.error ?: "正在评分…"
+                                else semanticRerankDiagnosticText(event.detailJson))
+                            },
+                        )
                     }
                 }
             }

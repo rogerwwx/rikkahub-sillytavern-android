@@ -52,14 +52,7 @@ import me.rerere.rikkahub.utils.plus
 import org.koin.androidx.compose.koinViewModel
 
 /**
- * Jev 智能决策设置页.
- *
- * Jev（TypeSafe System One Model）只做判断、不生成文本，是客户端内部的隐形决策层，
- * 不会出现在用户可选的模型列表里。三个接管开关各自顶掉一块既有功能，被顶掉的那个
- * 入口会同步进入禁用态，避免"开关开了但旧入口还在生效"。
- *
- * Key 没填或地址非法时开关照样能打开，只是实际不生效——这时顶部出黄色提示，
- * 所有请求失败一律静默回退原逻辑。
+ * Jev 共享连接与独立 judge 工具设置；语义记忆重排在助手的记忆设置中启用。
  */
 @Composable
 fun SettingJevPage(vm: SettingVM = koinViewModel()) {

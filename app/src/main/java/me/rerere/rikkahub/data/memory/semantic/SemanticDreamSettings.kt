@@ -33,23 +33,11 @@ data class SemanticDreamSettings(
     val protectCore: Boolean = true,
     val jevEnabled: Boolean = false,
     val jevRecall: Boolean = false,
-    val jevDreamReview: Boolean = false,
     val jevTimeoutMillis: Int = 2500,
     /** 粗召回后送进 Jev 重排的候选条数；再多也只取融合顺序前 N 条。 */
     val jevCandidateCount: Int = 20,
-    /** 重排后按相关性硬过滤的最低分数；0 表示只排序不过滤。 */
-    val jevMinRelevance: Double = 0.0,
-    val jevRecallYes: Double = 0.80,
-    val jevRecallNo: Double = 0.20,
-    val jevRetentionYes: Double = 0.85,
-    val jevRetentionNo: Double = 0.15,
-    val jevEvidenceYes: Double = 0.90,
-    val jevEvidenceNo: Double = 0.10,
 ) {
     fun normalized(): SemanticDreamSettings {
-        val recall = probabilityPair(jevRecallYes, jevRecallNo, 0.8, 0.2)
-        val retention = probabilityPair(jevRetentionYes, jevRetentionNo, 0.85, 0.15)
-        val evidence = probabilityPair(jevEvidenceYes, jevEvidenceNo, 0.9, 0.1)
         return copy(
             minCompletedTurns = minCompletedTurns.coerceIn(1, 1000),
             idleMinutes = idleMinutes.coerceIn(1, 1440),
@@ -70,10 +58,6 @@ data class SemanticDreamSettings(
             unknownTtlDays = unknownTtlDays.coerceIn(1, 3650),
             jevTimeoutMillis = jevTimeoutMillis.coerceIn(250, 10000),
             jevCandidateCount = jevCandidateCount.coerceIn(1, 100),
-            jevMinRelevance = if (jevMinRelevance.isFinite()) jevMinRelevance.coerceIn(0.0, 1.0) else 0.0,
-            jevRecallYes = recall.first, jevRecallNo = recall.second,
-            jevRetentionYes = retention.first, jevRetentionNo = retention.second,
-            jevEvidenceYes = evidence.first, jevEvidenceNo = evidence.second,
         )
     }
 
@@ -86,7 +70,3 @@ data class SemanticDreamSettings(
         else -> unknownTtlDays
     }
 }
-
-private fun probabilityPair(yes: Double, no: Double, defaultYes: Double, defaultNo: Double): Pair<Double, Double> =
-    if (yes.isFinite() && no.isFinite() && yes in 0.5..1.0 && no in 0.0..0.5 && no < yes) yes to no
-    else defaultYes to defaultNo

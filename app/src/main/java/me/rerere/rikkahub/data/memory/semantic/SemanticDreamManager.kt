@@ -310,7 +310,10 @@ class SemanticDreamManager(
             val query = window.evidence.filter { it.role == "user" }.joinToString("\n") {
                 snapshot.messages[it.position].text.substring(it.start, it.end)
             }.take(2000)
-            val recalled = if (query.isNotBlank()) repository.recall(assistantId, conversationId, query, config).hits.map { it.memory } else emptyList()
+            val recalled = if (query.isNotBlank()) {
+                val result = repository.recall(assistantId, conversationId, query, config)
+                jev.rerankRecall(assistantId, conversationId, query, window.context, config, result).hits.map { it.memory }
+            } else emptyList()
             val core = repository.list(assistantId, conversationId).filter { it.isCore && it.status == "active" }.take(config.coreBudget)
             val candidates = (recalled + core).distinctBy { it.id }
             val systemPrompt = config.dream.reflectionSystemPrompt()
@@ -327,15 +330,7 @@ class SemanticDreamManager(
             val response = usageRecorder.wrap(providerManager.getProviderByType(providerSetting),
                 UsageTag(UsageSource.MEMORY, Uuid.parse(assistantId), conversation.id))
                 .generateTextComplete(providerSetting, listOf(UIMessage.system(systemPrompt), UIMessage.user(input)), params, stream)
-            var draft = parseDreamDraft(response.message.toText())
-            val retained = jev.reviewCandidates(assistantId, conversationId, window.transcript, oldContext,
-                draft.changes.mapIndexed { index, change ->
-                    val target = change.targetId?.let { repository.get(assistantId, conversationId, it) }
-                    SemanticJevCandidate(index.toString(), change.content ?: target?.content.orEmpty(),
-                        change.type, change.operation, change.targetId, change.scope, change.evidence,
-                        target?.isCore == true || query.contains("记住"))
-                }, config)
-            draft = draft.copy(changes = draft.changes.filterIndexed { index, _ -> index.toString() in retained })
+            val draft = parseDreamDraft(response.message.toText())
             var changed = 0
             conversationRepo.withSourceLock {
                 require(config(assistantId) == config) { "做梦设置或模式已变化" }

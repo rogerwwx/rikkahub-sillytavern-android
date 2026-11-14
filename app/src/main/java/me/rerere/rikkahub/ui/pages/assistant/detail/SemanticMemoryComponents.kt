@@ -19,6 +19,7 @@ import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.components.ui.CardGroupIcon
 import me.rerere.rikkahub.ui.components.ui.CardGroupValue
 import kotlin.math.roundToInt
+import kotlinx.serialization.json.*
 
 @Composable
 internal fun SemanticMemorySection(
@@ -34,6 +35,18 @@ internal fun SemanticMemorySection(
         )
     }
 }
+
+internal fun semanticRerankDiagnosticText(raw: String): String = try {
+    val details = Json.parseToJsonElement(raw).jsonObject
+    val items = details["items"]?.jsonArray.orEmpty()
+    val selected = details["selected"]?.jsonPrimitive?.intOrNull
+        ?: items.count { it.jsonObject["kept"]?.jsonPrimitive?.booleanOrNull == true }
+    val scored = details["scored"]?.jsonPrimitive?.intOrNull ?: 0
+    val elapsed = details["elapsedMillis"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+    val fallback = details["fallback"]?.jsonPrimitive?.contentOrNull
+    "候选 ${items.size} 条 · 已评分 $scored 条 · 选用 $selected 条 · ${"%.0f".format(elapsed)} 毫秒" +
+        (fallback?.let { "\n已使用原召回结果：$it" } ?: "")
+} catch (_: Exception) { "重排记录尚未完成" }
 
 @Composable
 internal fun SemanticIntSlider(

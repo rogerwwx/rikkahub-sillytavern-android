@@ -7,8 +7,8 @@ import kotlinx.serialization.json.JsonElement
 /**
  * TypeSafe System One Model（Jev）请求/响应模型。
  *
- * 协议要点（照官方 SDK 里 vendored 的 OpenAPI schema，勿凭印象改）：
- * - 请求体只有 state / model / questions 三个顶层字段，多一个字段会被拒。
+ * 协议要点（2026-11-14 核对 https://api.typesafe.ai/openapi.json）：
+ * - 文本请求必填 state / model / questions；图片另有可选 assets，本客户端只发文本。
  * - questions 是 **map** 不是数组；question id 不会发给模型，只用于取回答案。
  * - type 必须小写（noul / choice / score），写成 Noul 会得到一个有误导性的通用 400。
  * - state 与 instructions 可以是 string | object | array（EntryType），所以用 JsonElement。
