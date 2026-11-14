@@ -2477,6 +2477,10 @@ class ChatService(
                     val attemptStartedAt = System.currentTimeMillis()
                     // 重试要从空草稿重新开始，否则界面会把两次尝试的文本拼在一起。
                     onDraft?.invoke("")
+                    // 显式标注类型，避免嵌套 lambda 的返回类型推断出歧义。
+                    val draftSink: ((String) -> Unit)? = onDraft?.let { report ->
+                        { text: String -> report(text.takeLast(draftChars)) }
+                    }
                     try {
                         providerHandler.generateTextComplete(setting = provider,
                             messages = listOf(UIMessage.user(prompt)),
@@ -2484,9 +2488,7 @@ class ChatService(
                             params = backgroundTextGenerationParams(model, conversationId).copy(
                                 maxTokens = outputBudget, customBody = model.customBodies.withoutMemoryOverrides()),
                             stream = stream,
-                            onDelta = onDraft?.let { draft ->
-                                { text -> draft(text.takeLast(draftChars)) }
-                            })
+                            onDelta = draftSink)
                             .also { done ->
                                 Logging.log(TAG, "压缩片段 ${index + 1}/${segments.size} 尝试 $attempts 完成：" +
                                     "耗时 ${System.currentTimeMillis() - attemptStartedAt}ms finish=${done.finishReason} " +

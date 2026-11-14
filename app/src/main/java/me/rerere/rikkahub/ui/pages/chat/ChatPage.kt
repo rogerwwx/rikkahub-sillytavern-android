@@ -179,7 +179,6 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     val currentChatModel by vm.currentChatModel.collectAsStateWithLifecycle()
     val assistant by vm.assistant.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
-    val compressDraft by vm.compressDraft.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // 新会话发出首条消息前跟随抽屉选中的文件夹；等初始化落到真实助手后再判一次
@@ -1837,6 +1836,8 @@ private fun ChatFilesPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val voiceState by vm.voiceSession.state.collectAsStateWithLifecycle()
+    // 压缩草稿只在弹出压缩对话框时才有内容，在这里收集即可，不必提升到整个页面。
+    val compressDraft by vm.compressDraft.collectAsStateWithLifecycle()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     var showCompressDialog by remember { mutableStateOf(false) }
