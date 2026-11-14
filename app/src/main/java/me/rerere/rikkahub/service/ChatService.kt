@@ -90,11 +90,13 @@ import me.rerere.rikkahub.data.ai.UsageSource
 import me.rerere.rikkahub.data.ai.UsageTag
 import me.rerere.rikkahub.data.ai.withoutMemoryOverrides
 import me.rerere.rikkahub.data.ai.context.CompressionSource
-import me.rerere.rikkahub.data.ai.context.CompressionSegment
 import me.rerere.rikkahub.data.ai.context.COMPRESSION_HISTORY_CONTENT_REFERENCE
+import me.rerere.rikkahub.data.ai.context.COMPRESSION_SEGMENT_CONTENT_REFERENCE
 import me.rerere.rikkahub.data.ai.context.buildCompressionHistoryRequest
 import me.rerere.rikkahub.data.ai.context.buildBufferedCompressionRequest
+import me.rerere.rikkahub.data.ai.context.compressionSegmentInstruction
 import me.rerere.rikkahub.data.ai.context.planCompressionSegments
+import me.rerere.rikkahub.data.ai.context.planCompressionTurnSegments
 import me.rerere.rikkahub.data.ai.context.estimateTextTokens
 import me.rerere.rikkahub.data.ai.context.splitTextForTokenBudget
 import me.rerere.rikkahub.data.ai.TranslationHandler
@@ -2390,8 +2392,11 @@ class ChatService(
         historyAsMessages: Boolean = false,
         // 将原文保留为文本记录，后接两轮点号缓冲；与原角色历史模式互斥。
         bufferedText: Boolean = false,
+        // 按 user 轮次分段，不受模型分词器影响；0 全量，默认 50 轮，仅对本次生效。
+        turnsPerSegment: Int = 50,
     ): Result<Unit> = runCatching {
         require(!(historyAsMessages && bufferedText)) { "两种压缩输入方案不能同时启用" }
+        require(turnsPerSegment >= 0) { "压缩分段轮数不能为负数" }
         val compatibilityMode = historyAsMessages || bufferedText
         val session = sessionManager.getOrCreate(conversationId)
         // 生成循环按下标回写消息，期间插入节点会让回复写到错误的节点上。
@@ -2449,44 +2454,60 @@ class ChatService(
                 "（正文 $desiredTokens + 推理预留 $reasoningReserve + 余量 $outputSlack），" +
                 "超过模型输出上限 $outputLimit；请调低目标 token 或改用输出上限更大的模型"
         }
-        val historyPrompt = if (compatibilityMode) settings.compressPrompt.applyPlaceholders(
-            "content" to COMPRESSION_HISTORY_CONTENT_REFERENCE,
-            "target_tokens" to targetTokens.toString(),
-            "additional_context" to if (additionalPrompt.isNotBlank()) {
-                "Additional instructions from user: $additionalPrompt"
-            } else "",
-            "locale" to Locale.getDefault().displayName,
-        ) else ""
         val compressionSources = messagesToCompress.map { message ->
             CompressionSource(message.id.toString(), if (message.isContextCheckpoint) "checkpoint" else message.role.name.lowercase(),
                 message.summaryAsText(maxLength = Int.MAX_VALUE))
         }
-        // 手动压缩完整发送选中材料；两种兼容方案只改变消息排布，不改变输入范围或拆分请求。
-        val segments = listOf(CompressionSegment(
-            text = compressionSources.joinToString("\n\n") { it.text },
-            sourceIds = compressionSources.map { it.id },
-            sources = compressionSources,
-        ))
+        // 三种布局共用用户指定的轮数，整轮发送，0 时完整发送。
+        val segments = planCompressionTurnSegments(compressionSources, turnsPerSegment)
+        val totalTurns = segments.sumOf { it.turnCount.toLong() }
         var cumulativeSummary = ""
         for ((index, segment) in segments.withIndex()) {
             currentCoroutineContext().ensureActive()
+            val completedSummary = cumulativeSummary
+            fun appendToCompleted(text: String): String = when {
+                completedSummary.isBlank() -> text
+                text.isBlank() -> completedSummary
+                else -> "$completedSummary\n\n$text"
+            }
+            fun draftPreview(text: String): String =
+                context.getString(R.string.chat_page_compress_segment_progress, index + 1, segments.size) +
+                    "\n\n" + appendToCompleted(text).takeLast(draftChars)
+            val segmentTargetTokens = if (segments.size == 1) desiredTokens else
+                (desiredTokens.toLong() * segment.turnCount / totalTurns).toInt().coerceAtLeast(1)
+            val segmentInstruction = if (segments.size > 1)
+                "\n\n" + compressionSegmentInstruction(index + 1, segments.size, desiredTokens) else ""
             val contentToCompress = buildString {
-                if (cumulativeSummary.isNotBlank()) appendLine("已处理前缀的完整衔接摘要（需要保留并与新增片段合并）：\n$cumulativeSummary\n")
                 appendLine("顺序新增片段 ${index + 1}/${segments.size}；来源 ${segment.sourceIds.joinToString()}")
                 if (segment.partialTurn) appendLine("同一超长完整轮次的子段 ${segment.part}/${segment.partCount}；后续子段尚未提供，不推断缺失内容。")
                 append(segment.text)
             }
+            val defaultContent = buildString {
+                if (completedSummary.isNotBlank()) {
+                    appendLine("[已完成摘要，仅供承接参考，不要重写或重复输出]\n$completedSummary\n")
+                    appendLine("[本段新增原文]")
+                }
+                append(contentToCompress)
+            }
             val prompt = settings.compressPrompt.applyPlaceholders(
-                "content" to contentToCompress,
-                "target_tokens" to targetTokens.toString(),
+                "content" to defaultContent,
+                "target_tokens" to segmentTargetTokens.toString(),
                 "additional_context" to if (additionalPrompt.isNotBlank()) {
                     "Additional instructions from user: $additionalPrompt"
                 } else "",
                 "locale" to Locale.getDefault().displayName
-            )
+            ) + segmentInstruction
+            val historyPrompt = if (compatibilityMode) settings.compressPrompt.applyPlaceholders(
+                "content" to if (segments.size > 1) COMPRESSION_SEGMENT_CONTENT_REFERENCE else COMPRESSION_HISTORY_CONTENT_REFERENCE,
+                "target_tokens" to segmentTargetTokens.toString(),
+                "additional_context" to if (additionalPrompt.isNotBlank()) {
+                    "Additional instructions from user: $additionalPrompt"
+                } else "",
+                "locale" to Locale.getDefault().displayName,
+            ) + segmentInstruction else ""
             val requestMessages = when {
-                historyAsMessages -> buildCompressionHistoryRequest(segment, cumulativeSummary, historyPrompt)
-                bufferedText -> buildBufferedCompressionRequest(contentToCompress, historyPrompt)
+                historyAsMessages -> buildCompressionHistoryRequest(segment, completedSummary, historyPrompt)
+                bufferedText -> buildBufferedCompressionRequest(contentToCompress, historyPrompt, completedSummary)
                 else -> listOf(UIMessage.user(prompt))
             }
 
@@ -2504,11 +2525,11 @@ class ChatService(
                 }) {
                     attempts++
                     val attemptStartedAt = System.currentTimeMillis()
-                    // 重试要从空草稿重新开始，否则界面会把两次尝试的文本拼在一起。
-                    onDraft?.invoke("")
+                    // 重试只清掉当前片段的未完成文本，已完成片段继续保留在累计草稿中。
+                    onDraft?.invoke(draftPreview(""))
                     // 显式标注类型，避免嵌套 lambda 的返回类型推断出歧义。
                     val draftSink: ((String) -> Unit)? = onDraft?.let { report ->
-                        { text: String -> report(text.takeLast(draftChars)) }
+                        { text: String -> report(draftPreview(text)) }
                     }
                     try {
                         providerHandler.generateTextComplete(setting = provider,
@@ -2540,8 +2561,10 @@ class ChatService(
                     error,
                 )
             }
-            cumulativeSummary = result.message.toText().trim().takeIf { it.isNotBlank() }
+            val segmentSummary = result.message.toText().trim().takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("Failed to generate compressed summary")
+            cumulativeSummary = appendToCompleted(segmentSummary)
+            onDraft?.invoke(draftPreview(segmentSummary))
         }
         check(cumulativeSummary.isNotBlank()) { "压缩结果为空" }
         val compressedSummaries = listOf(cumulativeSummary)

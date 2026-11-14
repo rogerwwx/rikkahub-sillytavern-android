@@ -49,13 +49,15 @@ fun CompressContextDialog(
     // 助手未开启「压缩／记忆流式」时，压缩一次返回全部结果，没有可看的中间过程，就不显示草稿框。
     streaming: Boolean,
     draft: String?,
-    onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean) -> Job
+    onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean, turnsPerSegment: Int) -> Job
 ) {
     var additionalPrompt by remember { mutableStateOf("") }
     var selectedTokens by remember { mutableIntStateOf(2000) }
     var keepRecentMessages by remember { mutableIntStateOf(32) }
     var historyAsMessages by remember { mutableStateOf(false) }
     var bufferedText by remember { mutableStateOf(false) }
+    var segmentTurnsText by remember { mutableStateOf("50") }
+    val turnsPerSegment = segmentTurnsText.toIntOrNull() ?: 0
     val tokenOptions = listOf(500, 4000)
     var customMode by remember { mutableStateOf(false) }
     var customText by remember { mutableStateOf("2000") }
@@ -153,6 +155,16 @@ fun CompressContextDialog(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+
+                    OutlinedTextField(
+                        value = segmentTurnsText,
+                        onValueChange = { segmentTurnsText = it.filter(Char::isDigit).take(6) },
+                        label = { Text(stringResource(R.string.chat_page_compress_segment_size)) },
+                        supportingText = { Text(stringResource(R.string.chat_page_compress_segment_size_desc)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
 
                     // Additional context input
                     OutlinedTextField(
@@ -276,7 +288,7 @@ fun CompressContextDialog(
                 TextButton(
                     enabled = !customMode || customTokens != null,
                     onClick = {
-                        currentJob = onConfirm(additionalPrompt, effectiveTokens, keepRecentMessages, historyAsMessages, bufferedText)
+                        currentJob = onConfirm(additionalPrompt, effectiveTokens, keepRecentMessages, historyAsMessages, bufferedText, turnsPerSegment)
                     }
                 ) {
                     Text(stringResource(R.string.confirm))

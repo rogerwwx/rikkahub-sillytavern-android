@@ -15,6 +15,21 @@ private val compressionHistoryInstruction = """
 internal const val COMPRESSION_HISTORY_CONTENT_REFERENCE =
     "待压缩材料已放在上方的历史消息中，包括已有衔接摘要及顺序新增片段；请合并整理这些记录。"
 
+internal const val COMPRESSION_SEGMENT_CONTENT_REFERENCE =
+    "当前片段原文已放在上方。已完成摘要仅供承接参考；不要重写它，只输出当前片段需要追加的摘要。"
+
+/** 分段时只续写新增摘要，避免每一段重新输出前缀；不改写用户保存的模板。 */
+internal fun compressionSegmentInstruction(part: Int, partCount: Int, targetTokens: Int): String = """
+    [本次分段压缩要求]
+    当前是按原文顺序处理的第 $part/$partCount 段，整份摘要目标约 $targetTokens token。
+    上述长度要求用于本段新增摘要；已完成部分仅供承接理解，不属于本段需要重新总结的原文。
+    请在已完成摘要的基础上继续整理，只输出本段新增的摘要正文，不重复已有摘要或从头写一份完整总结。
+    除第一段外，不再重复摘要标题或开场标记，用本段的剧情节点承接前文。
+    保留本段新增的事实、因果、人物状态变化及剧情时间；如果它改变了前文状态，写清变化发生在本段。
+    尚未提供的后续片段不要推测。不要输出接下来会继续处理的说明，程序会按顺序追加本段结果。
+    此分段要求优先于模板中重新合并整份已完成摘要的要求；不添加原文没有的细节来凑长度。
+""".trimIndent()
+
 /** 历史只含正文文本；额外的任务指令独立设置，不把原文提升为 system 指令。 */
 internal fun buildCompressionHistoryRequest(
     segment: CompressionSegment,
@@ -23,7 +38,7 @@ internal fun buildCompressionHistoryRequest(
 ): List<UIMessage> = buildList {
     add(UIMessage.system(compressionHistoryInstruction))
     if (cumulativeSummary.isNotBlank()) {
-        add(UIMessage.user("[已处理前缀的完整衔接摘要，需要与新增片段合并]\n$cumulativeSummary"))
+        add(UIMessage.user("[已完成摘要，仅供承接参考，不要重写或重复输出]\n$cumulativeSummary"))
     }
     add(UIMessage.user(buildString {
         append("以下是顺序新增的待压缩记录。")
@@ -48,8 +63,11 @@ internal fun buildCompressionHistoryRequest(
 }
 
 /** 保留角色标签的文本记录，以非空点号消息分隔原文和末尾压缩指令。 */
-internal fun buildBufferedCompressionRequest(content: String, prompt: String): List<UIMessage> = buildList {
+internal fun buildBufferedCompressionRequest(content: String, prompt: String, cumulativeSummary: String = ""): List<UIMessage> = buildList {
     add(UIMessage.system(compressionHistoryInstruction))
+    if (cumulativeSummary.isNotBlank()) {
+        add(UIMessage.user("[已完成摘要，仅供承接参考，不要重写或重复输出]\n$cumulativeSummary"))
+    }
     add(UIMessage.user("<conversation>\n$content\n</conversation>"))
     // 先隔开原文 user，再追加两轮 user/assistant；点号通过非空校验，仅存在于本次请求。
     add(UIMessage.assistant("."))

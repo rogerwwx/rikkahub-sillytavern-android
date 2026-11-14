@@ -105,7 +105,7 @@ internal fun FilesPicker(
     chatModel: Model?,
     state: ChatInputState,
     mcpManager: McpManager,
-    onCompressContext: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean) -> Job,
+    onCompressContext: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean, turnsPerSegment: Int) -> Job,
     onUndoLastCompression: () -> Job,
     // 流式压缩的实时草稿；非流式助手传 null，弹窗里不显示草稿框。
     compressDraft: String?,
@@ -395,8 +395,8 @@ internal fun FilesPicker(
             },
             streaming = assistant.compressionMemoryStream,
             draft = compressDraft,
-            onConfirm = { additionalPrompt, targetTokens, keepRecentMessages, historyAsMessages, bufferedText ->
-                onCompressContext(additionalPrompt, targetTokens, keepRecentMessages, historyAsMessages, bufferedText)
+            onConfirm = { additionalPrompt, targetTokens, keepRecentMessages, historyAsMessages, bufferedText, turnsPerSegment ->
+                onCompressContext(additionalPrompt, targetTokens, keepRecentMessages, historyAsMessages, bufferedText, turnsPerSegment)
             },
         )
     }

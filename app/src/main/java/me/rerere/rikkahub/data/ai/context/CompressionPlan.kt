@@ -2,7 +2,32 @@ package me.rerere.rikkahub.data.ai.context
 
 data class CompressionSource(val id: String, val role: String, val text: String)
 data class CompressionSegment(val text: String, val sourceIds: List<String>, val partialTurn: Boolean = false,
-    val part: Int = 1, val partCount: Int = 1, val sources: List<CompressionSource> = emptyList())
+    val part: Int = 1, val partCount: Int = 1, val sources: List<CompressionSource> = emptyList(),
+    val turnCount: Int = 1)
+
+/** 一条 user 及后续回复为一轮；前置摘要随首轮发送，0 表示整段一次请求。 */
+fun planCompressionTurnSegments(sources: List<CompressionSource>, turnsPerSegment: Int): List<CompressionSegment> {
+    require(turnsPerSegment >= 0)
+    if (sources.isEmpty()) return emptyList()
+    val turns = mutableListOf<MutableList<CompressionSource>>()
+    var hasSeenUser = false
+    sources.forEach { source ->
+        if (turns.isEmpty() || (source.role == "user" && hasSeenUser)) turns += mutableListOf<CompressionSource>()
+        turns.last() += source
+        if (source.role == "user") hasSeenUser = true
+    }
+    val chunkSize = if (turnsPerSegment == 0) turns.size else turnsPerSegment
+    val chunks = turns.chunked(chunkSize)
+    return chunks.map { chunk ->
+        val chunkSources = chunk.flatten()
+        CompressionSegment(
+            text = chunkSources.joinToString("\n\n") { it.text },
+            sourceIds = chunkSources.map { it.id },
+            sources = chunkSources,
+            turnCount = chunk.size,
+        )
+    }
+}
 
 /** 先按用户轮次组合；单轮超预算才分有编号的子段，正文不静默截断。 */
 fun planCompressionSegments(sources: List<CompressionSource>, tokenBudget: Int,
