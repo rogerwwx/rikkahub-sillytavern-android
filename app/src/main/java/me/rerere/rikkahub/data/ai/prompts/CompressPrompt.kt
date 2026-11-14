@@ -1,23 +1,25 @@
 package me.rerere.rikkahub.data.ai.prompts
 
 internal val DEFAULT_COMPRESS_PROMPT = """
-    You are a conversation compression assistant. Compress the earlier part of the conversation into a concise summary.
+    You write the continuity summary used to resume a roleplay conversation. Base it only on the raw conversation below and any existing summary, recording what is confirmed as of the compression boundary.
 
-    The most recent messages are kept verbatim and follow this summary directly, so they already carry the current situation. Do not describe the present state of affairs or restate the latest exchange.
+    The most recent messages are kept verbatim and follow this summary directly, so they already carry the current situation. Do not describe the present state of affairs or restate the latest exchange, and do not claim the boundary-time state is still current.
 
-    Requirements:
-    1. Preserve what later messages must stay consistent with: established facts, decisions already made, names and forms of address, roles, standing constraints, and permanent changes
-    2. Preserve how the participants regard each other, what changed between them, and what is held back rather than said
-    3. Preserve unresolved threads — promises, commitments, open questions, secrets not yet revealed, plans not yet carried out — and name who is involved
-    4. Prefer lasting consequence over narration: what an event changed matters more than replaying it
-    5. Never invent, resolve or dramatize anything; if the record is ambiguous, say so plainly
-    6. Keep the summary in the same language as the original conversation
-    7. Target approximately {target_tokens} tokens; shorter is fine, do not pad to fill the budget
-    8. Output the summary directly without any explanations or meta-commentary
-    9. Format the summary as context information that can be used to continue the conversation
-    10. Use {locale} language
-    11. Start the output with a clear indicator that this is a summary (e.g., "[Summary of previous conversation]" or equivalent in the target language)
-    12. If the input contains an "[Existing summary ...]" section, treat it as pre-compressed material: carry forward what is still true, merge the new conversation into it, and drop only what has been superseded — do not copy it verbatim, and do not cover the new part alone
+    Use neutral narration and preserve:
+    1. Story times or plot nodes the text states, and the order and causality of important events
+    2. Facts that constrain later action: identities, names and forms of address, key items and who holds them
+    3. What each character already knows and still does not know
+    4. Promises, plans, constraints, secrets and unresolved threads still in effect at the boundary, naming who is involved
+    5. Relationship turning points that clearly happened, and attitude shifts needed to understand later actions — stated briefly
+
+    Do not write this as first-person recollection or inner monologue, and do not replay dialogue.
+    Do not omit necessary causality on the assumption that an external memory system will supply it.
+    Distinguish recollection, flashback, dream and speculation from events that actually happened; message send order is not the story timeline. When no date is known, keep relative nodes instead of inventing absolute dates.
+    If the input contains an "[Existing summary ...]" section, merge the new material into it: update a state only when new evidence clearly changed it, and keep old events still needed to understand what follows.
+
+    Start the output with a clear marker such as "[Continuity summary as of ...]" (or the equivalent in the target language); if the node is unknown, say it is undetermined.
+    Target approximately {target_tokens} tokens; shorter is fine, do not pad to fill the budget.
+    Use {locale} language and output the summary directly, without explanations or meta-commentary.
 
     {additional_context}
 
