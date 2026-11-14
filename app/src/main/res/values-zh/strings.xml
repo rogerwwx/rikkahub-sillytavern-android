@@ -321,6 +321,8 @@
   <string name="chat_page_compress_custom_tokens">自定义</string>
   <string name="chat_page_compress_warning">压缩后的原文仍显示在分隔线上方；后续请求使用摘要和保留的消息。</string>
   <string name="chat_page_compressing">正在压缩...</string>
+  <string name="chat_page_compress_draft_title">实时草稿（生成中，未定稿）</string>
+  <string name="chat_page_compress_draft_waiting">等待模型输出...</string>
   <string name="chat_page_conversation_system_prompt">对话系统提示</string>
   <string name="chat_page_conversation_system_prompt_clear">清除</string>
   <string name="chat_page_conversation_system_prompt_hint">覆盖此对话的角色卡系统提示</string>

@@ -321,6 +321,8 @@
   <string name="chat_page_compress_custom_tokens">Custom</string>
   <string name="chat_page_compress_warning">The original messages remain visible above the compressed-context divider. Future requests use the summary and retained messages.</string>
   <string name="chat_page_compressing">Compressing...</string>
+  <string name="chat_page_compress_draft_title">Live draft (in progress, not final)</string>
+  <string name="chat_page_compress_draft_waiting">Waiting for the model...</string>
   <string name="chat_page_conversation_system_prompt">Conversation System Prompt</string>
   <string name="chat_page_conversation_system_prompt_clear">Clear</string>
   <string name="chat_page_conversation_system_prompt_hint">Override the character card\'s system prompt for this conversation</string>

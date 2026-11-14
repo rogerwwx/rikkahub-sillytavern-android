@@ -2378,7 +2378,9 @@ class ChatService(
         conversation: Conversation,
         additionalPrompt: String,
         targetTokens: Int,
-        keepRecentMessages: Int = 32
+        keepRecentMessages: Int = 32,
+        // 仅用于界面展示流式草稿；不会改变提交校验，非流式时不会被调用。
+        onDraft: ((String) -> Unit)? = null,
     ): Result<Unit> = runCatching {
         val session = sessionManager.getOrCreate(conversationId)
         // 生成循环按下标回写消息，期间插入节点会让回复写到错误的节点上。
@@ -2425,6 +2427,8 @@ class ChatService(
         // 这里按 AUTO 思考档预留推理开销再加余量，并把上下文窗口当作单次输出硬上限
         // （Model 没有单独的输出上限字段，未知窗口沿用原来的 32000）。
         val desiredTokens = targetTokens.coerceIn(128, 16000)
+        // 草稿只给界面滚动看，留尾部这些字符足够；整段摘要不必一直挂在 state 上。
+        val draftChars = 4000
         val reasoningReserve = 2048
         val outputSlack = 512
         val outputBudget = desiredTokens + reasoningReserve + outputSlack
@@ -2471,13 +2475,18 @@ class ChatService(
                 }) {
                     attempts++
                     val attemptStartedAt = System.currentTimeMillis()
+                    // 重试要从空草稿重新开始，否则界面会把两次尝试的文本拼在一起。
+                    onDraft?.invoke("")
                     try {
                         providerHandler.generateTextComplete(setting = provider,
                             messages = listOf(UIMessage.user(prompt)),
                             // 思考模型的推理 token 与正文共用 maxTokens，outputBudget 已含推理预留。
                             params = backgroundTextGenerationParams(model, conversationId).copy(
                                 maxTokens = outputBudget, customBody = model.customBodies.withoutMemoryOverrides()),
-                            stream = stream)
+                            stream = stream,
+                            onDelta = onDraft?.let { draft ->
+                                { text -> draft(text.takeLast(draftChars)) }
+                            })
                             .also { done ->
                                 Logging.log(TAG, "压缩片段 ${index + 1}/${segments.size} 尝试 $attempts 完成：" +
                                     "耗时 ${System.currentTimeMillis() - attemptStartedAt}ms finish=${done.finishReason} " +

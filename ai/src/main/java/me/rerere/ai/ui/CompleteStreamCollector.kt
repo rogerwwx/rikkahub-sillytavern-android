@@ -10,14 +10,24 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.TextGenerationResult
 
-/** 合并正文/推理/工具，验证整个流后才把正式结果交给后台消费者。 */
-suspend fun collectCompleteStream(flow: Flow<StreamChunk>, model: Model? = null): TextGenerationResult {
+/**
+ * 合并正文/推理/工具，验证整个流后才把正式结果交给后台消费者。
+ *
+ * [onDelta] 只用于展示进度（例如压缩时的实时草稿）：拿到的是**未经验证的中间文本**，
+ * 可能被截断或被取消，不能当作结果使用。非流式调用不会触发它。
+ */
+suspend fun collectCompleteStream(
+    flow: Flow<StreamChunk>,
+    model: Model? = null,
+    onDelta: ((String) -> Unit)? = null,
+): TextGenerationResult {
     val guard = CompleteStreamGuard()
     val handler = StreamChunkHandler(model)
     var message = UIMessage(role = MessageRole.ASSISTANT, parts = emptyList(), modelId = model?.id)
     flow.collect { chunk ->
         guard.accept(chunk)
         message = handler.handle(listOf(message), chunk).single()
+        if (chunk is StreamChunk.TextDelta) onDelta?.invoke(message.toText())
     }
     val finish = guard.requireComplete()
     return TextGenerationResult(finish.responseId ?: message.id.toString(), finish.model ?: model?.modelId.orEmpty(),
@@ -26,7 +36,8 @@ suspend fun collectCompleteStream(flow: Flow<StreamChunk>, model: Model? = null)
 
 suspend fun <T : ProviderSetting> Provider<T>.streamTextComplete(
     setting: T, messages: List<UIMessage>, params: TextGenerationParams,
-): TextGenerationResult = collectCompleteStream(streamText(setting, messages, params), params.model)
+    onDelta: ((String) -> Unit)? = null,
+): TextGenerationResult = collectCompleteStream(streamText(setting, messages, params), params.model, onDelta)
 
 /** 非流式也须有明确正常完成证据；推理和历史工具不能代替本次正文。 */
 fun validateCompleteResponse(result: TextGenerationResult): TextGenerationResult {
@@ -109,5 +120,6 @@ fun completeStreamFailureText(
 /** 压缩与记忆共用严格响应契约；开关只决定调用 Provider 的哪种传输方式。 */
 suspend fun <T : ProviderSetting> Provider<T>.generateTextComplete(
     setting: T, messages: List<UIMessage>, params: TextGenerationParams, stream: Boolean,
-): TextGenerationResult = if (stream) streamTextComplete(setting, messages, params)
+    onDelta: ((String) -> Unit)? = null,
+): TextGenerationResult = if (stream) streamTextComplete(setting, messages, params, onDelta)
 else validateCompleteResponse(generateText(setting, messages, params))

@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.analytics.FirebaseAnalytics
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -298,19 +299,29 @@ class ChatVM(
         chatService.generateSystemNarration(_conversationId, prompt, name, at, trim)
     }
 
+    /** 流式压缩时的实时草稿，只用于展示；提交结果仍以最终校验通过为准。 */
+    val compressDraft = MutableStateFlow<String?>(null)
+
     /**
      * 压缩上下文
      */
     fun handleCompressContext(additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int): Job {
+        compressDraft.value = null
         return viewModelScope.launch {
-            chatService.compressConversation(
-                _conversationId,
-                conversation.value,
-                additionalPrompt,
-                targetTokens,
-                keepRecentMessages
-            ).onFailure {
-                chatService.addError(it, title = context.getString(R.string.error_title_compress_conversation))
+            try {
+                chatService.compressConversation(
+                    _conversationId,
+                    conversation.value,
+                    additionalPrompt,
+                    targetTokens,
+                    keepRecentMessages,
+                    onDraft = { compressDraft.value = it },
+                ).onFailure {
+                    chatService.addError(it, title = context.getString(R.string.error_title_compress_conversation))
+                }
+            } finally {
+                // 结束（成功、失败、取消）都清掉草稿，避免下次打开弹窗看到上次残留。
+                compressDraft.value = null
             }
         }
     }

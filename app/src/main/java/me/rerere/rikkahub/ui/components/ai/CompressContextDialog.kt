@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -42,6 +43,9 @@ import me.rerere.rikkahub.R
 @Composable
 fun CompressContextDialog(
     onDismiss: () -> Unit,
+    // 助手未开启「压缩／记忆流式」时，压缩一次返回全部结果，没有可看的中间过程，就不显示草稿框。
+    streaming: Boolean,
+    draft: String?,
     onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int) -> Job
 ) {
     var additionalPrompt by remember { mutableStateOf("") }
@@ -89,6 +93,9 @@ fun CompressContextDialog(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(stringResource(R.string.chat_page_compressing))
+                    }
+                    if (streaming) {
+                        CompressDraftBox(draft)
                     }
                 } else {
                     Text(stringResource(R.string.chat_page_compress_context_desc))
@@ -228,4 +235,27 @@ fun CompressContextDialog(
             }
         }
     )
+}
+
+/**
+ * 流式压缩的实时草稿。只是进度展示：内容可能还没写完，或因截断/取消而作废，
+ * 真正的摘要仍以提交完成后的 checkpoint 为准，所以这里明确标注「生成中，未定稿」。
+ */
+@Composable
+private fun CompressDraftBox(draft: String?) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = stringResource(R.string.chat_page_compress_draft_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = draft.orEmpty(),
+            onValueChange = {},
+            readOnly = true,
+            placeholder = { Text(stringResource(R.string.chat_page_compress_draft_waiting)) },
+            textStyle = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp),
+        )
+    }
 }
