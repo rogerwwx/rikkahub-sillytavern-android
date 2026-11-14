@@ -315,9 +315,9 @@
   <string name="chat_page_compress_context">Compress History</string>
   <string name="chat_page_compress_context_desc">Compress the conversation into a summary to save tokens</string>
   <string name="chat_page_compress_history_compat">Option 1: Original conversation roles</string>
-  <string name="chat_page_compress_history_compat_desc">Send records with their original user/assistant roles and keep compression instructions in the final message. Individual message and total context limits still apply. Off by default, for this compression only.</string>
+  <string name="chat_page_compress_history_compat_desc">Send the complete selected records with their original user/assistant roles, add two rounds of dot buffers, then put only the compression instructions in the final message. Off by default, for this compression only.</string>
   <string name="chat_page_compress_buffered_text">Option 2: Text records with dot buffers</string>
-  <string name="chat_page_compress_buffered_text_desc">Send role-labeled records as an earlier user message, add two user/assistant rounds containing only a dot (.), then give the compression instructions. Only one option can be enabled. Both off uses the original layout; individual message and total context limits still apply.</string>
+  <string name="chat_page_compress_buffered_text_desc">Send all selected role-labeled records as an earlier user message, add two user/assistant rounds containing only a dot (.), then give the compression instructions. Only one option can be enabled. Both off uses the original layout.</string>
   <string name="chat_page_compress_context_title">Compress Conversation History</string>
   <string name="chat_page_compress_keep_recent">Keep recent messages</string>
   <string name="chat_page_compress_not_enough_messages">Not enough messages to compress. Reduce the number of messages to keep or add more messages.</string>

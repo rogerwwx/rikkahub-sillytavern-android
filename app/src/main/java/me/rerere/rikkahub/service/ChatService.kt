@@ -92,10 +92,8 @@ import me.rerere.rikkahub.data.ai.withoutMemoryOverrides
 import me.rerere.rikkahub.data.ai.context.CompressionSource
 import me.rerere.rikkahub.data.ai.context.CompressionSegment
 import me.rerere.rikkahub.data.ai.context.COMPRESSION_HISTORY_CONTENT_REFERENCE
-import me.rerere.rikkahub.data.ai.context.COMPRESSION_HISTORY_MESSAGE_OVERHEAD
 import me.rerere.rikkahub.data.ai.context.buildCompressionHistoryRequest
 import me.rerere.rikkahub.data.ai.context.buildBufferedCompressionRequest
-import me.rerere.rikkahub.data.ai.context.estimateCompressionHistoryInputTokens
 import me.rerere.rikkahub.data.ai.context.planCompressionSegments
 import me.rerere.rikkahub.data.ai.context.estimateTextTokens
 import me.rerere.rikkahub.data.ai.context.splitTextForTokenBudget
@@ -2462,25 +2460,17 @@ class ChatService(
             CompressionSource(message.id.toString(), if (message.isContextCheckpoint) "checkpoint" else message.role.name.lowercase(),
                 message.summaryAsText(maxLength = Int.MAX_VALUE))
         }
-        val sourceOverheadTokens = when {
-            historyAsMessages -> COMPRESSION_HISTORY_MESSAGE_OVERHEAD
-            // 文本记录沿用原片段说明里的来源 ID，按每来源的最大估算计入分段预算。
-            bufferedText -> compressionSources.maxOfOrNull { estimateTextTokens(it.id) + 1 } ?: 0
-            else -> 0
+        val segments = if (compatibilityMode) {
+            // 兼容方案将完整选中材料放入较早的历史，一次请求，不按本地输入预算拦截或分段。
+            listOf(CompressionSegment(
+                text = compressionSources.joinToString("\n\n") { it.text },
+                sourceIds = compressionSources.map { it.id },
+                sources = compressionSources,
+            ))
+        } else {
+            val inputBudget = (outputLimit - outputBudget - 2048).coerceIn(512, 16000)
+            planCompressionSegments(compressionSources, inputBudget, ::estimateTextTokens, ::splitTextForTokenBudget)
         }
-        val historyInputLimit = (outputLimit - outputBudget - 2048).coerceAtMost(16000)
-        val inputBudget = if (compatibilityMode) {
-            // 按完整请求估算：任务/摘要指令、分隔消息和累计摘要也占窗口；
-            // 累计摘要先预留目标大小，每段发送前再以实际结果严格复核。
-            val fixedMessages = if (bufferedText) buildBufferedCompressionRequest("", historyPrompt)
-                else buildCompressionHistoryRequest(CompressionSegment("", emptyList()), "", historyPrompt)
-            val fixedTokens = estimateCompressionHistoryInputTokens(fixedMessages)
-            (historyInputLimit - fixedTokens - desiredTokens - 128).also {
-                require(it > 0) { "压缩输入预算不足：指令、摘要及输出预留超过模型上下文窗口；请缩短指令或调低目标 token" }
-            }
-        } else (outputLimit - outputBudget - 2048).coerceIn(512, 16000)
-        val segments = planCompressionSegments(compressionSources, inputBudget, ::estimateTextTokens, ::splitTextForTokenBudget,
-            sourceOverheadTokens = sourceOverheadTokens)
         var cumulativeSummary = ""
         for ((index, segment) in segments.withIndex()) {
             currentCoroutineContext().ensureActive()
@@ -2502,14 +2492,6 @@ class ChatService(
                 historyAsMessages -> buildCompressionHistoryRequest(segment, cumulativeSummary, historyPrompt)
                 bufferedText -> buildBufferedCompressionRequest(contentToCompress, historyPrompt)
                 else -> listOf(UIMessage.user(prompt))
-            }.also { messages ->
-                if (compatibilityMode) {
-                    val estimatedInput = estimateCompressionHistoryInputTokens(messages)
-                    require(estimatedInput <= historyInputLimit) {
-                        "压缩输入预算不足：本段完整请求约 $estimatedInput token，可用 $historyInputLimit；" +
-                            "累计摘要或指令过长，请调低目标 token 或缩短指令"
-                    }
-                }
             }
 
             // 只重试可能是瞬时的失败：IO 与协议未完成。finish reason=length 是确定性截断，
