@@ -261,6 +261,7 @@ class SemanticMemoryRepository(
             dao.putEvent(event)
             try {
                 val config = settings.normalized()
+                val retrievalQuery = query.trim()
                 val now = System.currentTimeMillis()
                 val all = list(assistantId, conversationId)
                 val active = all.filter { it.status == "active" && (it.isCore || it.expiresAt == null || it.expiresAt > now) }
@@ -274,9 +275,10 @@ class SemanticMemoryRepository(
                 val limit = config.topK * config.candidateMultiplier
                 // 查询侧中文二元组与 jieba 词元一起 OR 连接：短查询和专有名词的切词差异由二元组补召回。
                 // jieba_query 无词元时用哨兵词占位，避免 MATCH 空串抛 SQLiteException。
-                val bigramSuffix = semanticCjkBigramQuery(query).let { if (it.isEmpty()) "" else " OR " + it }
+                // 两路及中文扩展读取相同查询；聊天追加的背景在入口限长，不能在此裁掉当前用户的尾部意图。
+                val bigramSuffix = semanticCjkBigramQuery(retrievalQuery).let { if (it.isEmpty()) "" else " OR " + it }
                 val lexical = try {
-                    if (query.isBlank()) emptyList() else {
+                    if (retrievalQuery.isBlank()) emptyList() else {
                         // 用编号参数保持绑定顺序为 0..4（查询、助手、窗口、时间、条数）不变，
                         // 二元组扩展作为第 6 个参数只在 SQL 文本里引用，避免改变既有 DAO 参数契约。
                         dao.lexical(SimpleSQLiteQuery("""SELECT m.id AS id, bm25(semantic_fts) AS score
@@ -285,7 +287,7 @@ class SemanticMemoryRepository(
                             AND m.assistantId = ?2 AND m.conversationId = ?3 AND m.status = 'active'
                             AND (m.isCore = 1 OR m.expiresAt IS NULL OR m.expiresAt > ?4)
                             ORDER BY score ASC, m.id LIMIT ?5""", arrayOf<Any?>(
-                            query.trim().take(4096), assistantId, conversationId, now, limit, bigramSuffix)))
+                            retrievalQuery, assistantId, conversationId, now, limit, bigramSuffix)))
                             .map { it.id to it.score }
                     }
                 } catch (error: CancellationException) { throw error
@@ -296,7 +298,7 @@ class SemanticMemoryRepository(
                 }
                 val vector = try {
                     val base = fingerprint(config)
-                    val (queryFingerprint, queryVectors) = request(assistantId, listOf(query), config, "query",
+                    val (queryFingerprint, queryVectors) = request(assistantId, listOf(retrievalQuery), config, "query",
                         conversationId = conversationId)
                     val queryVector = queryVectors.single()
                     check(queryFingerprint == "$base:${queryVector.size}" && fingerprint(config) == base) {
@@ -371,7 +373,7 @@ class SemanticMemoryRepository(
                     put("deduplicatedCandidates", ranked.size); put("recalled", hits.size); put("injected", 0)
                     put("fusionMode", SemanticRankingDefaults.FUSION_MODE.name.lowercase())
                     put("candidatePool", candidates.size)
-                    put("queryHash", semanticContentHash(query))
+                    put("queryHash", semanticContentHash(retrievalQuery))
                     put("hits", JsonArray(hits.map { hit -> buildJsonObject {
                         put("id", hit.memory.id); put("version", hit.memory.contentVersion)
                         put("type", hit.memory.type); put("score", hit.rank.score)

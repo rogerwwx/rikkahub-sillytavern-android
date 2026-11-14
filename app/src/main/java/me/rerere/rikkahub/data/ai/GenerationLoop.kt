@@ -48,9 +48,11 @@ import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.PromptDebugCache
 import me.rerere.rikkahub.data.ai.tools.buildAssistantMemoryTools
 import me.rerere.rikkahub.data.memory.semantic.SemanticMemoryRepository
+import me.rerere.rikkahub.data.memory.semantic.SemanticMemorySettings
 import me.rerere.rikkahub.data.memory.semantic.SemanticRecallResult
 import me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist
 import me.rerere.rikkahub.data.memory.semantic.budgetSemanticRecall
+import me.rerere.rikkahub.data.memory.semantic.buildSemanticRecallInput
 import me.rerere.rikkahub.data.memory.semantic.semanticRecallPrompt
 import me.rerere.rikkahub.data.memory.semantic.injectSemanticPrompt
 import me.rerere.rikkahub.data.ai.tools.truncateForToolResult
@@ -361,7 +363,11 @@ class GenerationLoop(
     var semanticRevision: String? = null
     var semanticRecall: SemanticRecallResult? = null
     var injectedSemanticEventId: String? = null
-    val semanticQuery = messages.lastOrNull { it.role == MessageRole.USER }?.toText().orEmpty()
+    val semanticInput = buildSemanticRecallInput(messages, assistant.contextMessageLimit)
+    suspend fun currentSemanticRevision(config: SemanticMemorySettings): String = semanticInput.cacheKey(
+        semanticMemoryRepo.recallRevision(assistant.id.toString(), requireNotNull(conversationId).toString(), config),
+        if (config.dream.jevEnabled && config.dream.jevRecall) semanticJevAssist.configurationRevision() else "",
+    )
     for (stepIndex in 0 until maxSteps) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
             val semanticConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: assistant.semanticMemory.normalized()
@@ -388,15 +394,13 @@ class GenerationLoop(
                     conversationId?.let { id ->
                         UserContextAnchorCache.getOrCreate(id).blocks.removeAll { it.tag == ANCHOR_TAG_MEMORY }
                     }
-                    val revision = semanticMemoryRepo.recallRevision(assistant.id.toString(), conversationId.toString(), semanticConfig) +
-                        if (semanticConfig.dream.jevEnabled && semanticConfig.dream.jevRecall)
-                            semanticJevAssist.configurationRevision() else ""
+                    val revision = currentSemanticRevision(semanticConfig)
                     if (revision != semanticRevision) {
-                        semanticRecall = if (semanticQuery.isBlank()) null else {
+                        semanticRecall = if (semanticInput.retrievalQuery.isBlank()) null else {
                             // 重排作用在未按 token 预算裁剪的候选池上；预算只决定最终注入多少。
-                            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticQuery, semanticConfig)
-                            val reranked = semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(), semanticQuery,
-                                messages.takeLast(6).joinToString("\n") { "${it.role}: ${it.toText()}" }.take(6000),
+                            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticInput.retrievalQuery, semanticConfig)
+                            val reranked = semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(), semanticInput.currentUserMessage,
+                                semanticInput.recentContext,
                                 semanticConfig, recalled)
                             budgetSemanticRecall(reranked, semanticConfig)
                         }
@@ -422,8 +426,7 @@ class GenerationLoop(
                     }
                 }
                 if (semanticRecall != null && conversationId != null && latestConfig.dream.jevEnabled && latestConfig.dream.jevRecall) {
-                    val currentRevision = semanticMemoryRepo.recallRevision(assistant.id.toString(), conversationId.toString(), latestConfig) +
-                        semanticJevAssist.configurationRevision()
+                    val currentRevision = currentSemanticRevision(latestConfig)
                     if (currentRevision != semanticRevision) {
                         semanticRevision = null
                         semanticRecall = null

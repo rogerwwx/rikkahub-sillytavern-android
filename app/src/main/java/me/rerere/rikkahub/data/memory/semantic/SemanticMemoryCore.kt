@@ -81,12 +81,15 @@ object SemanticRankingDefaults {
     const val MMR_LAMBDA = 0.7
 }
 
+private fun finiteSemanticRoute(scores: List<Pair<String, Double>>): List<Pair<String, Double>> =
+    scores.filter { it.second.isFinite() }.distinctBy { it.first }
+
 /**
  * FTS5 bm25() 越小越相关（原始值为负数），这里按 LivingMemory bm25_retriever.py:250-265
  * 翻转为 [0,1] 且越大越相关；全部相同时统一为 1.0。
  */
 fun normalizeSemanticBm25(scores: List<Pair<String, Double>>): List<Pair<String, Double>> {
-    val finite = scores.distinctBy { it.first }.filter { it.second.isFinite() }
+    val finite = finiteSemanticRoute(scores)
     if (finite.isEmpty()) return emptyList()
     val high = finite.maxOf { it.second }
     val low = finite.minOf { it.second }
@@ -118,8 +121,9 @@ fun semanticCjkBigramQuery(text: String): String =
 
 /**
  * 分数级融合（LivingMemory rrf_fusion.py:145-237 fuse_scores）。
- * 两路各自在本次查询内 min-max 归一化到 [0,1] 后按权重求和；某一路缺失时按可用路线
- * 重新归一化权重；两路都召回时按名次接近程度追加共识加成。
+ * 两路各自在本次查询内 min-max 归一化到 [0,1] 后按权重求和。
+ * 只有整路没有候选时才重新归一化权重；单条缺路按零贡献，不能抵消该路权重。
+ * 两路都召回时按名次接近程度追加共识加成；路线请求失败由 [fuseSemanticRanks] 单独退化。
  */
 fun fuseSemanticScores(
     lexical: List<Pair<String, Double>>,
@@ -128,7 +132,9 @@ fun fuseSemanticScores(
     agreementBonus: Double = SemanticRankingDefaults.AGREEMENT_BONUS,
     limit: Int = Int.MAX_VALUE,
 ): List<SemanticRankHit> {
-    if (lexical.isEmpty() && vector.isEmpty()) return emptyList()
+    val lexicalRoute = finiteSemanticRoute(lexical)
+    val vectorRoute = finiteSemanticRoute(vector)
+    if (lexicalRoute.isEmpty() && vectorRoute.isEmpty()) return emptyList()
     val weight = bm25Weight.coerceIn(0.0, 1.0)
 
     fun normalize(route: List<Pair<String, Double>>): Map<String, Double> {
@@ -140,21 +146,20 @@ fun fuseSemanticScores(
         else values.mapValues { (_, value) -> (value - low) / (high - low) }
     }
 
-    val lexicalRank = lexical.withIndex().associate { (rank, item) -> item.first to rank }
-    val vectorRank = vector.withIndex().associate { (rank, item) -> item.first to rank }
-    val lexicalNorm = normalize(lexical)
-    val vectorNorm = normalize(vector)
-    val lexicalScores = lexical.toMap()
-    val vectorScores = vector.toMap()
-    val span = maxOf(lexical.size, vector.size, 1)
+    val lexicalRank = lexicalRoute.withIndex().associate { (rank, item) -> item.first to rank }
+    val vectorRank = vectorRoute.withIndex().associate { (rank, item) -> item.first to rank }
+    val lexicalNorm = normalize(lexicalRoute)
+    val vectorNorm = normalize(vectorRoute)
+    val lexicalScores = lexicalRoute.toMap()
+    val vectorScores = vectorRoute.toMap()
+    val span = maxOf(lexicalRoute.size, vectorRoute.size, 1)
+    val weightTotal = (if (lexicalRoute.isNotEmpty()) weight else 0.0) +
+        (if (vectorRoute.isNotEmpty()) 1.0 - weight else 0.0)
 
     data class Scored(val hit: SemanticRankHit, val bestRank: Int)
 
     val scored = (lexicalNorm.keys + vectorNorm.keys).toSet().map { id ->
-        var weighted = 0.0
-        var weightTotal = 0.0
-        lexicalNorm[id]?.let { weighted += weight * it; weightTotal += weight }
-        vectorNorm[id]?.let { weighted += (1.0 - weight) * it; weightTotal += 1.0 - weight }
+        val weighted = weight * (lexicalNorm[id] ?: 0.0) + (1.0 - weight) * (vectorNorm[id] ?: 0.0)
         var score = if (weightTotal != 0.0) weighted / weightTotal else 0.0
         val lexicalPosition = lexicalRank[id]
         val vectorPosition = vectorRank[id]
@@ -163,8 +168,8 @@ fun fuseSemanticScores(
             score += agreementBonus * (1.0 - rankGap.toDouble() / span)
         }
         val bestRank = minOf(
-            lexicalPosition ?: (lexical.size + 1),
-            vectorPosition ?: (vector.size + 1),
+            lexicalPosition ?: (lexicalRoute.size + 1),
+            vectorPosition ?: (vectorRoute.size + 1),
         )
         Scored(SemanticRankHit(id, lexicalScores[id], vectorScores[id], score), bestRank)
     }.sortedWith(
@@ -292,8 +297,7 @@ fun fuseSemanticRanks(
         }.take(capacity)
 
     val lexicalNormalized = normalizeSemanticBm25(lexical)
-    val vectorGated = vector.distinctBy { it.first }
-        .filter { it.second.isFinite() && it.second >= minSimilarity }
+    val vectorGated = finiteSemanticRoute(vector).filter { it.second >= minSimilarity }
     val lexicalScores = lexicalNormalized.toMap()
     val vectorScores = vectorGated.toMap()
     val fused = when {
