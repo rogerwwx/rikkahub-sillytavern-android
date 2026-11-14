@@ -2461,17 +2461,12 @@ class ChatService(
             CompressionSource(message.id.toString(), if (message.isContextCheckpoint) "checkpoint" else message.role.name.lowercase(),
                 message.summaryAsText(maxLength = Int.MAX_VALUE))
         }
-        val segments = if (compatibilityMode) {
-            // 兼容方案将完整选中材料放入较早的历史，一次请求，不按本地输入预算拦截或分段。
-            listOf(CompressionSegment(
-                text = compressionSources.joinToString("\n\n") { it.text },
-                sourceIds = compressionSources.map { it.id },
-                sources = compressionSources,
-            ))
-        } else {
-            val inputBudget = (outputLimit - outputBudget - 2048).coerceIn(512, 16000)
-            planCompressionSegments(compressionSources, inputBudget, ::estimateTextTokens, ::splitTextForTokenBudget)
-        }
+        // 手动压缩完整发送选中材料；两种兼容方案只改变消息排布，不改变输入范围或拆分请求。
+        val segments = listOf(CompressionSegment(
+            text = compressionSources.joinToString("\n\n") { it.text },
+            sourceIds = compressionSources.map { it.id },
+            sources = compressionSources,
+        ))
         var cumulativeSummary = ""
         for ((index, segment) in segments.withIndex()) {
             currentCoroutineContext().ensureActive()
