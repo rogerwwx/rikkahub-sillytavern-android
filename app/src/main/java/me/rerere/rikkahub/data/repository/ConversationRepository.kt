@@ -428,8 +428,6 @@ class ConversationRepository(
         return Conversation(
             id = Uuid.parse(conversationEntity.id),
             title = conversationEntity.title,
-            // 旧版本可能把生成中断留下的空分支留在选中位；读入时退回最近的非空分支，
-            // 让被顶掉的旧回复重新显示（分支本身一直还在，不需要改库结构）。
             messageNodes = messageNodes.filter { it.messages.isNotEmpty() },
             createAt = Instant.ofEpochMilli(conversationEntity.createAt),
             updateAt = Instant.ofEpochMilli(conversationEntity.updateAt),
@@ -445,7 +443,7 @@ class ConversationRepository(
                 .takeIf(String::isNotEmpty)
                 ?.let { runCatching { JsonInstant.decodeFromString<me.rerere.rikkahub.data.ai.context.RollingContextSummary>(it) }.getOrNull() },
             config = conversationEntity.config.ifEmpty { null }?.let { JsonInstant.decodeFromString(it) },
-        ).selectNonEmptyBranches()
+        )
     }
 
     fun getPinnedConversations(): Flow<List<Conversation>> {
