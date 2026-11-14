@@ -234,6 +234,30 @@ internal fun Conversation.hidePrefixWithSummaries(
     return copy(messageNodes = hiddenPrefix + summaryNodes + messageNodes.drop(index + 1))
 }
 
+/** 移除最新的可用摘要，恢复它覆盖的原文及上一份摘要，保留更早的压缩前缀。 */
+internal fun Conversation.undoLastCompression(): Conversation? {
+    val checkpointIndex = messageNodes.indexOfLast {
+        it.currentMessage.isContextCheckpoint && !it.currentMessage.isContextHidden
+    }
+    // 旧版直接删除原文的摘要位于首节点，没有可恢复的压缩前缀。
+    if (checkpointIndex <= 0) return null
+    val previousCheckpointIndex = messageNodes.take(checkpointIndex)
+        .indexOfLast { it.currentMessage.isContextCheckpoint }
+    val restoreFrom = previousCheckpointIndex.coerceAtLeast(0)
+    val restoredNodes = messageNodes.mapIndexedNotNull { index, node ->
+        when {
+            index == checkpointIndex -> null
+            index in restoreFrom until checkpointIndex -> node.copy(
+                messages = node.messages.map { message ->
+                    if (message.isContextHidden) message.copy(isContextHidden = false) else message
+                },
+            )
+            else -> node
+        }
+    }
+    return copy(messageNodes = restoredNodes)
+}
+
 /** 有工具调用在等待用户审批：这一轮还没结束，排队的消息要等审批完成后再发 */
 internal val Conversation.isAwaitingToolApproval: Boolean
     get() = currentMessages.any { message -> message.getTools().any { it.isPending } }

@@ -328,6 +328,16 @@ class ChatVM(
         }
     }
 
+    fun handleUndoLastCompression(): Job = viewModelScope.launch {
+        chatService.undoLastCompression(_conversationId, conversation.value).onFailure {
+            chatService.addError(
+                it,
+                conversationId = _conversationId,
+                title = context.getString(R.string.error_title_undo_compression),
+            )
+        }
+    }
+
     suspend fun forkMessage(message: UIMessage): Conversation {
         return chatService.forkConversationAtMessage(_conversationId, message.id)
     }

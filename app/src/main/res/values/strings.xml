@@ -314,6 +314,11 @@
   <string name="chat_page_compress_additional_prompt_hint">Specify what to preserve or focus on</string>
   <string name="chat_page_compress_context">Compress History</string>
   <string name="chat_page_compress_context_message_count">Context: %d messages</string>
+  <string name="chat_page_undo_compression">Undo last compression</string>
+  <string name="chat_page_undo_compression_blocked_generating">Stop the generation before undoing compression</string>
+  <string name="chat_page_undo_compression_changed">The conversation changed. Please retry undoing compression.</string>
+  <string name="chat_page_undo_compression_unavailable">No original messages are available to restore from the last compression.</string>
+  <string name="error_title_undo_compression">Could not undo compression</string>
   <string name="chat_page_compress_context_desc">Compress the conversation into a summary to save tokens</string>
   <string name="chat_page_compress_history_compat">Option 1: Original conversation roles</string>
   <string name="chat_page_compress_history_compat_desc">Send the complete selected records with their original user/assistant roles, add two rounds of dot buffers, then put only the compression instructions in the final message. Off by default, for this compression only.</string>

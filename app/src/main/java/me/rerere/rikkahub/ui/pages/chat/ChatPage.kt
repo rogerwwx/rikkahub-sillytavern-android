@@ -1862,6 +1862,7 @@ private fun ChatFilesPickerSheet(
             chatModel = chatModel,
             mcpManager = vm.mcpManager,
             onCompressContext = vm::handleCompressContext,
+            onUndoLastCompression = vm::handleUndoLastCompression,
             compressDraft = compressDraft,
             onUpdateAssistant = vm::updateAssistant,
             onUpdateWorkspaceCwd = vm::updateWorkspaceCwd,

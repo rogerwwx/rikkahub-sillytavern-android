@@ -166,6 +166,7 @@ import me.rerere.rikkahub.data.model.getStoredAssistantOf
 import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.data.model.hidePrefixWithSummaries
+import me.rerere.rikkahub.data.model.undoLastCompression
 import me.rerere.rikkahub.data.model.replacePrefixWithSummaries
 import me.rerere.rikkahub.data.model.GenerationType
 import me.rerere.rikkahub.data.model.toMessageNode
@@ -2583,6 +2584,33 @@ class ChatService(
                 updated.copy(chatSuggestions = emptyList())
             }
             saveConversation(conversationId, newConversation, allowShrink = true, rollbackOnFailure = true)
+        }
+    }.onFailure { if (it is CancellationException) throw it }
+
+    /** 撤销最后一次手动压缩；原文仍由现有来源锁与保存回滚保护。 */
+    suspend fun undoLastCompression(
+        conversationId: Uuid,
+        conversation: Conversation,
+    ): Result<Unit> = runCatching {
+        val session = sessionManager.getOrCreate(conversationId)
+        check(!session.isGenerating) { context.getString(R.string.chat_page_undo_compression_blocked_generating) }
+        conversationRepo.withSourceLock {
+            currentCoroutineContext().ensureActive()
+            fun sameSource(latest: Conversation): Boolean =
+                latest.assistantId == conversation.assistantId && latest.messageNodes == conversation.messageNodes
+            val persisted = conversationRepo.getConversationById(conversationId)
+                ?: throw IllegalStateException(context.getString(R.string.chat_page_undo_compression_changed))
+            check(sameSource(persisted)) { context.getString(R.string.chat_page_undo_compression_changed) }
+            val restored = synchronized(session) {
+                check(!session.isGenerating) { context.getString(R.string.chat_page_undo_compression_blocked_generating) }
+                check(session.contentTrusted) { context.getString(R.string.chat_page_undo_compression_changed) }
+                val latest = session.state.value
+                check(sameSource(latest)) { context.getString(R.string.chat_page_undo_compression_changed) }
+                val updated = latest.undoLastCompression()
+                    ?: throw IllegalStateException(context.getString(R.string.chat_page_undo_compression_unavailable))
+                updated.copy(chatSuggestions = emptyList())
+            }
+            saveConversation(conversationId, restored, allowShrink = true, rollbackOnFailure = true)
         }
     }.onFailure { if (it is CancellationException) throw it }
 

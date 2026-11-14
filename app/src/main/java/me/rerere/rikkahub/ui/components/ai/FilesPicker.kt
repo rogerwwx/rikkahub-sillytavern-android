@@ -56,6 +56,7 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowLeft01
 import me.rerere.hugeicons.stroke.ArrowRight01
+import me.rerere.hugeicons.stroke.ArrowTurnBackward
 import me.rerere.hugeicons.stroke.Book02
 import me.rerere.hugeicons.stroke.Camera01
 import me.rerere.hugeicons.stroke.Codesandbox
@@ -105,6 +106,7 @@ internal fun FilesPicker(
     state: ChatInputState,
     mcpManager: McpManager,
     onCompressContext: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean) -> Job,
+    onUndoLastCompression: () -> Job,
     // 流式压缩的实时草稿；非流式助手传 null，弹窗里不显示草稿框。
     compressDraft: String?,
     onUpdateAssistant: (Assistant) -> Unit,
@@ -195,8 +197,11 @@ internal fun FilesPicker(
                 // 分段列表：各项按显示条件依次占位，首尾项才有大圆角
                 val showWorkspace = workspaces.isNotEmpty()
                 val showMcp = settings.mcpServers.isNotEmpty()
+                val showUndoCompression = conversation.messageNodes.any {
+                    it.currentMessage.isContextCheckpoint && !it.currentMessage.isContextHidden
+                }
                 // 2 固定项 = 扩展 + 压缩，另有酒馆开关与插件入口两个本地固定项
-                val itemCount = 4 + listOf(showWorkspace, showWorkspace && showCwd, showMcp).count { it }
+                val itemCount = 4 + listOf(showWorkspace, showWorkspace && showCwd, showMcp, showUndoCompression).count { it }
                 var itemIndex = 0
                 Column(
                     verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
@@ -303,6 +308,21 @@ internal fun FilesPicker(
                         },
                     ) {
                         Text(stringResource(R.string.chat_page_compress_context))
+                    }
+
+                    if (showUndoCompression) {
+                        SegmentedListItem(
+                            onClick = {
+                                onUndoLastCompression()
+                                onDismiss()
+                            },
+                            shapes = ListItemDefaults.segmentedShapes(index = itemIndex++, count = itemCount),
+                            leadingContent = {
+                                Icon(HugeIcons.ArrowTurnBackward, contentDescription = null)
+                            },
+                        ) {
+                            Text(stringResource(R.string.chat_page_undo_compression))
+                        }
                     }
 
                     // 酒馆模式快捷开关：在发送栏就地切换，省去进设置页的往返
