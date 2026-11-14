@@ -44,8 +44,29 @@ internal fun semanticRerankDiagnosticText(raw: String): String = try {
     val scored = details["scored"]?.jsonPrimitive?.intOrNull ?: 0
     val elapsed = details["elapsedMillis"]?.jsonPrimitive?.doubleOrNull ?: 0.0
     val fallback = details["fallback"]?.jsonPrimitive?.contentOrNull
+    val batches = details["batchDetails"]?.jsonArray.orEmpty()
+    val cost = if (batches.isEmpty()) "\n服务端用量未提供；本地估算未记录" else buildString {
+        batches.forEachIndexed { index, rawBatch ->
+            val batch = rawBatch.jsonObject
+            val usage = batch["usage"] as? JsonObject
+            val model = batch["responseModel"]?.jsonPrimitive?.contentOrNull
+                ?: "未提供（请求 ${batch["requestedModel"]?.jsonPrimitive?.contentOrNull ?: "未知"}）"
+            val input = usage?.get("input_tokens")?.jsonPrimitive?.intOrNull
+            val output = usage?.get("output_tokens")?.jsonPrimitive?.intOrNull
+            val estimate = batch["estimatedTextTokens"]?.jsonPrimitive?.intOrNull
+            val bytes = batch["requestBytes"]?.jsonPrimitive?.intOrNull
+            val attempts = batch["attempts"]?.jsonPrimitive?.intOrNull
+            append("\n第 ${index + 1} 批 · 实际模型 $model")
+            append("\n服务端用量：输入 ${input?.toString() ?: "未提供"} / 输出 ${output?.toString() ?: "未提供"} token")
+            append("\n本地估算 ${estimate?.toString() ?: "未知"} token · 单次请求 ${bytes?.toString() ?: "未知"} 字节")
+            append(" · 尝试 ${attempts?.toString() ?: "未知"} 次")
+            if (input == null || output == null || attempts == null || attempts != 1) append(" · 成本记录不完整")
+            if (attempts != null && attempts > 1) append("（重试用量未知）")
+        }
+        append("\n本地估算不含服务端额外封装，不等于实际计费。")
+    }
     "候选 ${items.size} 条 · 已评分 $scored 条 · 选用 $selected 条 · ${"%.0f".format(elapsed)} 毫秒" +
-        (fallback?.let { "\n已使用原召回结果：$it" } ?: "")
+        (fallback?.let { "\n已使用原召回结果：$it" } ?: "") + cost
 } catch (_: Exception) { "重排记录尚未完成" }
 
 @Composable

@@ -11,6 +11,9 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import me.rerere.rikkahub.data.ai.context.estimateTextTokens
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -102,6 +105,7 @@ class JevClient(
         questions: Map<String, JevQuestion>,
         requestBudgetMillis: Long = 5000,
         maxRetries: Int = 1,
+        onDiagnostics: ((JevCallDiagnostics) -> Unit)? = null,
     ): Map<String, JevVerdict> {
         val config = effectiveConfig() ?: throw JevUnavailableException(l10n("Jev 未配置", "Jev is not configured"))
         if (questions.isEmpty()) return emptyMap()
@@ -112,6 +116,12 @@ class JevClient(
         val body = JevJson.encodeToString(
             JevRequest(state = state, model = config.model, questions = questions)
         )
+        var diagnostics = JevCallDiagnostics(config.model, body.toByteArray(Charsets.UTF_8).size,
+            estimateTextTokens(state.toString()) + questions.values.sumOf {
+                estimateTextTokens(it.instructions?.toString().orEmpty()) +
+                    estimateTextTokens(it.criteria?.toString().orEmpty())
+            })
+        onDiagnostics?.invoke(diagnostics)
         val url = resolveJevEndpoint(config.baseUrl)
         val request = Request.Builder()
             .url(url)
@@ -122,7 +132,10 @@ class JevClient(
 
         val response = try {
             withTimeout(requestBudgetMillis.coerceIn(250, 10000)) {
-                executeWithRetry(request, maxRetries.coerceIn(0, 2))
+                executeWithRetry(request, maxRetries.coerceIn(0, 2)) {
+                    diagnostics = diagnostics.copy(attempts = diagnostics.attempts + 1)
+                    onDiagnostics?.invoke(diagnostics)
+                }
             }
         } catch (_: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
@@ -132,13 +145,19 @@ class JevClient(
             throw JevHttpException(response.code, "Jev 请求失败")
         }
 
-        val answers = try {
-            val root = JevJson.parseToJsonElement(response.body) as? JsonObject
+        val root = try {
+            JevJson.parseToJsonElement(response.body) as? JsonObject
                 ?: throw JevProtocolException("Jev 响应顶层不是对象")
-            root["answers"] as? JsonObject ?: throw JevProtocolException("Jev 响应缺少 answers 对象")
         } catch (e: Exception) {
             throw JevProtocolException(l10n("Jev 响应解析失败", "Failed to parse Jev response"))
         }
+        diagnostics = diagnostics.copy(
+            responseModel = (root["model"] as? JsonPrimitive)?.takeIf { it.isString }
+                ?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() },
+            usage = jevResponseUsage(root["usage"]),
+        )
+        onDiagnostics?.invoke(diagnostics)
+        val answers = root["answers"] as? JsonObject ?: throw JevProtocolException("Jev 响应缺少 answers 对象")
         if (answers.keys.any { it !in questions }) throw JevProtocolException("Jev 返回了未知问题 ID")
         return questions.keys.mapNotNull { id ->
             val answer = answers[id]?.let { raw ->
@@ -188,11 +207,12 @@ class JevClient(
 
     private data class HttpResult(val code: Int, val body: String, val retryAfter: Long?)
 
-    private suspend fun executeWithRetry(request: Request, maxRetries: Int): HttpResult {
+    private suspend fun executeWithRetry(request: Request, maxRetries: Int, onAttempt: () -> Unit): HttpResult {
         var attempt = 0
         while (true) {
             currentCoroutineContext().ensureActive()
             try {
+                onAttempt()
                 val response = awaitResponse(request)
                 if (!shouldRetry(response.code) || attempt >= maxRetries) return response
                 delay(response.retryAfter ?: backoffMs(attempt))
@@ -257,7 +277,7 @@ class JevClient(
         return base + jitter
     }
 
-    /** 设置页只展示模型名，用于诊断里记录本次判断实际使用的版本。 */
+    /** 配置中的请求模型或别名；实际响应版本由 onDiagnostics 单独提供。 */
     suspend fun modelVersion(): String = effectiveConfig()?.model ?: "unconfigured"
 
     companion object {

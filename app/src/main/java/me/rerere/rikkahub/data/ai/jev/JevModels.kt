@@ -3,6 +3,9 @@ package me.rerere.rikkahub.data.ai.jev
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
 /**
  * TypeSafe System One Model（Jev）请求/响应模型。
@@ -70,8 +73,28 @@ data class JevResponse(
 
 @Serializable
 data class JevUsage(
-    @SerialName("input_tokens") val inputTokens: Int = 0,
-    @SerialName("output_tokens") val outputTokens: Int = 0,
+    @SerialName("input_tokens") val inputTokens: Int? = null,
+    @SerialName("output_tokens") val outputTokens: Int? = null,
+)
+
+/** 服务端可选用量逐字段读取；缺失或非法值是未知，不能补成 0，也不能影响有效答案。 */
+internal fun jevResponseUsage(raw: JsonElement?): JevUsage? {
+    val usage = raw as? JsonObject ?: return null
+    fun tokens(key: String): Int? = (usage[key] as? JsonPrimitive)
+        ?.takeUnless { it.isString }?.intOrNull?.takeIf { it >= 0 }
+    val input = tokens("input_tokens")
+    val output = tokens("output_tokens")
+    return if (input == null && output == null) null else JevUsage(input, output)
+}
+
+/** 每批诊断快照；用量仅属于收到的响应，不含没有 usage 的失败或重试。 */
+data class JevCallDiagnostics(
+    val requestedModel: String,
+    val requestBytes: Int,
+    val estimatedTextTokens: Int,
+    val attempts: Int = 0,
+    val responseModel: String? = null,
+    val usage: JevUsage? = null,
 )
 
 /**

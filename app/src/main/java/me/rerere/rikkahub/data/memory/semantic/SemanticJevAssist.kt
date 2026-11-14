@@ -7,10 +7,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import me.rerere.rikkahub.data.ai.jev.*
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import kotlin.math.roundToInt
+import java.util.Locale
 
 class SemanticJevAssist(
     private val client: JevClient,
@@ -44,10 +41,7 @@ class SemanticJevAssist(
         val pool = (head + coreOutside).distinctBy { it.memory.id }
         if (pool.isEmpty()) return result
         val items = pool.mapIndexed { index, hit -> RerankItem(hit, index) }
-        val state = buildJsonObject {
-            put("retrieval_context", semanticRerankContext(query, recentContext))
-            put("task", "逐条评价长期记忆对当前角色扮演回应的帮助程度；候选之间互相独立")
-        }
+        val state = JevPrompts.memoryRerankState(semanticRerankContext(query, recentContext))
         val started = System.nanoTime()
         val event = try { start(assistantId, conversationId, "recall_rerank") }
         catch (cancel: CancellationException) { throw cancel }
@@ -56,17 +50,28 @@ class SemanticJevAssist(
         val (batches, skipped) = planRerankBatches(state, items)
         var failure: String? = if (batches.isEmpty()) "候选或检索上下文超出 64KB 请求体预算"
             else if (skipped > 0) "$skipped 条候选超出 64KB 请求体预算，未评分" else null
-        var batchesSent = 0
+        val batchDetails = mutableListOf<RerankBatchDiagnostic>()
         try {
             val completed = if (batches.isEmpty()) true else withTimeoutOrNull(config.jevTimeoutMillis.toLong()) {
                 for (batch in batches) {
                     if (failure != null) break
                     val questions = batch.associate { "r${it.position}" to it.question }
-                    val response = try { client.judge(state, questions, 10000, 1) }
-                    catch (cancel: CancellationException) { throw cancel }
-                    catch (error: Exception) { failure = safeError(error); emptyMap() }
-                    batchesSent++
+                    val diagnostic = RerankBatchDiagnostic(batch.size, batch.sumOf { it.hit.memory.content.length })
+                    batchDetails += diagnostic
+                    val batchStarted = System.nanoTime()
+                    val response = try {
+                        client.judge(state, questions, 10000, 1) { diagnostic.request = it }
+                    } catch (cancel: CancellationException) {
+                        diagnostic.status = "cancelled"
+                        throw cancel
+                    } catch (error: Exception) {
+                        failure = safeError(error)
+                        emptyMap()
+                    } finally {
+                        diagnostic.elapsedMillis = (System.nanoTime() - batchStarted) / 1_000_000.0
+                    }
                     if (response.size != questions.size) failure = failure ?: "批量缺答或非法答案"
+                    diagnostic.status = if (failure == null) "success" else "failure"
                     batch.forEach { item ->
                         val score = response["r${item.position}"]?.score
                         val maxScore = (item.question.criteria as JsonArray).lastIndex.toDouble()
@@ -75,7 +80,10 @@ class SemanticJevAssist(
                 }
                 true
             }
-            if (completed == null) failure = failure ?: "请求预算耗尽"
+            if (completed == null) {
+                failure = failure ?: "请求预算耗尽"
+                batchDetails.lastOrNull()?.status = "timeout"
+            }
             if (failure == null && items.any { it.score == null }) failure = "部分候选未评分"
             // 全部候选都有分数才排序；否则保留融合顺序，绝不把部分分数混进最终排名。
             val ordered = if (failure == null)
@@ -85,14 +93,16 @@ class SemanticJevAssist(
             val hits = if (failure == null)
                 (core + ordered).distinctBy { it.position }.take(normalized.topK).map { it.hit }
             else result.hits
-            finishRerank(event, model, items, ordered, hits, failure, normalized, batchesSent, started)
+            finishRerank(event, model, items, ordered, hits, failure, normalized, batchDetails, started)
             return result.copy(hits = hits,
                 filters = result.filters + ("jev_rerank_pool" to pool.size),
                 durationNanos = result.durationNanos + System.nanoTime() - started,
                 degraded = result.degraded + listOfNotNull(failure?.let { "Jev 重排回退：$it" }))
         } catch (cancel: CancellationException) {
-            withContext(NonCancellable) { runCatching { repository.dao.putEvent(event.copy(status = "cancelled",
-                durationNanos = System.nanoTime() - started, error = "重排判断已取消")) } }
+            withContext(NonCancellable) {
+                finishRerank(event, model, items, items, result.hits, "重排判断已取消", normalized,
+                    batchDetails, started, cancelled = true)
+            }
             throw cancel
         }
     }
@@ -108,7 +118,8 @@ class SemanticJevAssist(
     /** 重排诊断：候选 id/分数/保留、批次数、耗时、分数分布与回退原因；不含正文。 */
     private suspend fun finishRerank(event: SemanticDiagnosticEvent, model: String, items: List<RerankItem>,
         ordered: List<RerankItem>, hits: List<SemanticRecallHit>, failure: String?,
-        settings: SemanticMemorySettings, batches: Int, started: Long) {
+        settings: SemanticMemorySettings, batches: List<RerankBatchDiagnostic>, started: Long,
+        cancelled: Boolean = false) {
         val keptIds = hits.map { it.memory.id }.toSet()
         val finalRank = ordered.withIndex().associate { (index, item) -> item.hit.memory.id to index + 1 }
         val scores = items.mapNotNull { it.score }
@@ -116,7 +127,8 @@ class SemanticJevAssist(
             put("mode", "rerank")
             put("model", model)
             put("candidates", items.size)
-            put("batches", batches)
+            put("batches", batches.size)
+            put("batchDetails", JsonArray(batches.map { it.toJson() }))
             put("scored", scores.size)
             put("unscored", items.size - scores.size)
             put("topK", settings.topK)
@@ -136,10 +148,35 @@ class SemanticJevAssist(
             failure?.let { put("fallback", it) }
         }
         try {
-            repository.dao.putEvent(event.copy(status = if (failure != null) "failure" else "success",
+            repository.dao.putEvent(event.copy(status = if (cancelled) "cancelled" else if (failure != null) "failure" else "success",
                 durationNanos = System.nanoTime() - started, detailJson = details.toString(), error = failure))
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法保存重排诊断") }
+    }
+}
+
+/** 只保存长度、计数、模型和用量，不保存候选、场景、响应正文或连接信息。 */
+private class RerankBatchDiagnostic(val questions: Int, val contentChars: Int) {
+    var request: JevCallDiagnostics? = null
+    var status: String = "running"
+    var elapsedMillis: Double = 0.0
+
+    fun toJson(): JsonObject = buildJsonObject {
+        put("questions", questions)
+        put("contentChars", contentChars)
+        put("status", status)
+        put("elapsedMillis", elapsedMillis)
+        request?.let {
+            put("requestedModel", it.requestedModel)
+            it.responseModel?.let { model -> put("responseModel", model) }
+            put("requestBytes", it.requestBytes)
+            put("estimatedTextTokens", it.estimatedTextTokens)
+            put("attempts", it.attempts)
+            it.usage?.let { usage -> put("usage", buildJsonObject {
+                usage.inputTokens?.let { count -> put("input_tokens", count) }
+                usage.outputTokens?.let { count -> put("output_tokens", count) }
+            }) }
+        }
     }
 }
 
@@ -174,45 +211,35 @@ private fun planRerankBatches(state: JsonElement, items: List<RerankItem>): Pair
 }
 
 /**
- * 剧情检索上下文：当前场景/参与人物/当前意图/需要找回的信息＋检索原则。
- * 紧凑但有上限；最近上下文只作理解用，不当作新的用户消息。
+ * 剧情检索上下文；有上限时保留最新部分，资料不当作新的用户消息。
  */
 internal fun semanticRerankContext(query: String, recentContext: String): String {
-    val speakers = recentContext.lineSequence()
+    val trimmed = recentContext.trim()
+    var offset = (trimmed.length - JEV_RERANK_RECENT_CHARS).coerceAtLeast(0)
+    // 不从 UTF-16 代理对中间开始；截取后的首行可能缺角色标签，角色从完整输入读取。
+    if (offset > 0 && trimmed[offset].isLowSurrogate() && trimmed[offset - 1].isHighSurrogate()) offset++
+    val recent = trimmed.substring(offset)
+    val speakers = trimmed.lineSequence()
         .map { line -> line.substringBefore(':', "").trim() }
-        .mapNotNull { RERANK_SPEAKERS[it] }
+        .mapNotNull { RERANK_SPEAKERS[it.lowercase(Locale.ROOT)] }
         .distinct().take(4).toList()
     return buildString {
         appendLine("检索上下文（召回重排用，不是本轮用户消息）")
         appendLine("当前场景：${query.trim().take(JEV_RERANK_QUERY_CHARS)}")
         appendLine("参与人物：${speakers.ifEmpty { listOf("按最近上下文推断") }.joinToString("、")}")
-        appendLine("当前意图：在回复前找回能与本轮剧情衔接、并可能改变本轮回应的长期记忆")
-        appendLine("需要找回的信息：与本场景直接相关的共同经历、既有事实、关系、偏好与计划")
-        appendLine("检索原则：仅有相同关键词或相同话题不构成相关；只判断相关性，不判断真实性")
-        append("最近上下文：\n").append(recentContext.trim().take(JEV_RERANK_RECENT_CHARS))
+        append("最近上下文：\n").append(recent)
     }
 }
 
 /**
- * 候选文本模板：正文原样保留，其余字段来自 content/type/importance/createdAt/metadataJson。
- * 不扩写、不为凑关键词改写正文；正文只作为被判断的数据。
+ * 只提供人物归属和完整正文；存储时间、重要度和访问量不代表本轮剧情相关性。
  */
 internal fun semanticRerankItemText(memory: SemanticMemoryEntity): String {
     val metadata = runCatching { Json.parseToJsonElement(memory.metadataJson) as? JsonObject }.getOrNull()
     val scope = (metadata?.get("scope") as? JsonPrimitive)?.contentOrNull ?: "user"
-    val sources = runCatching { Json.parseToJsonElement(memory.sourceJson).jsonArray.size }.getOrDefault(0)
-    val relations = buildList {
-        (metadata?.get("supersededBy") as? JsonPrimitive)?.contentOrNull?.let { add("替代为 $it") }
-        (metadata?.get("consolidatedFrom") as? JsonArray)?.let { add("归纳自 ${it.size} 条") }
-        if (sources > 0) add("来源 $sources 条")
-    }
     return buildString {
-        appendLine("[时间] ${RERANK_TIME.format(Instant.ofEpochMilli(memory.createdAt).atZone(ZoneId.systemDefault()))}")
         appendLine("[人物] ${RERANK_SCOPES[scope] ?: scope}")
-        appendLine("[类型] ${memory.type}；重要度 ${(memory.importance * 100).roundToInt() / 100.0}")
-        appendLine("[内容] ${memory.content}")
-        appendLine("[关联] ${relations.ifEmpty { listOf("无") }.joinToString("；")}")
-        append("[状态] ${memory.status}${if (memory.isCore) "；核心" else ""}；访问 ${memory.accessCount} 次")
+        append("[内容] ").append(memory.content)
     }
 }
 
@@ -228,7 +255,6 @@ private fun scoreDistribution(scores: List<Double>): JsonObject {
     }
 }
 
-private val RERANK_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 private const val JEV_RERANK_QUERY_CHARS = 600
 private const val JEV_RERANK_RECENT_CHARS = 1300
 private val RERANK_SPEAKERS = mapOf("user" to "用户", "assistant" to "助手", "system" to "系统")
