@@ -9,6 +9,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.ModelSnapshot
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.isEmptyUIMessage
 import me.rerere.ai.util.InstantSerializer
 import me.rerere.rikkahub.data.datastore.DEFAULT_ASSISTANT_ID
 import me.rerere.rikkahub.data.datastore.Settings
@@ -81,6 +82,12 @@ data class Conversation(
         messages.forEachIndexed { index, message ->
             // 生成输入只含可见消息；已有消息按稳定ID定位，新分支才沿可见节点对齐。
             val nodeIndex = nodeIndexes[message.id] ?: visibleNodeIndexes.getOrNull(index) ?: newNodes.size
+            // 重生成先保留原回复，空的流开始事件或失败结果不能抢占选中分支。
+            if (message.id !in nodeIndexes &&
+                message.role == MessageRole.ASSISTANT &&
+                newNodes.getOrNull(nodeIndex)?.role == MessageRole.ASSISTANT &&
+                message.parts.isEmptyUIMessage()
+            ) return@forEachIndexed
             val node = newNodes
                 .getOrElse(nodeIndex) { message.toMessageNode() }
 

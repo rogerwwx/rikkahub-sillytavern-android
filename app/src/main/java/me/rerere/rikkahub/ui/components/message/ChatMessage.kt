@@ -243,7 +243,7 @@ fun ChatMessage(
         val showActions = if (lastMessage) {
             !loading
         } else {
-            message.parts.isEmptyUIMessage().not()
+            message.role == MessageRole.ASSISTANT || message.parts.isEmptyUIMessage().not()
         }
 
         val motionScheme = MaterialTheme.motionScheme

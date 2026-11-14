@@ -1082,7 +1082,6 @@ class GenerationLoop(
         try {
             val responseBaseMessages = messages.beginAssistantResponse(model)
             messages = responseBaseMessages
-            onUpdateMessages(responseBaseMessages)
             if (stream) {
                 // 每次重试都从本次模型调用开始前的消息快照重新合并，避免将重试响应
                 // 追加到已经展示的半截回复后面。预先创建助手消息可让所有尝试复用同一 ID，
@@ -1093,7 +1092,6 @@ class GenerationLoop(
                 while (true) {
                     val streamChunkHandler = StreamChunkHandler(model)
                     var attemptMessages = responseBaseMessages
-                    onUpdateMessages(attemptMessages)
                     // 防空回复：重试时对请求副本的末条用户消息做微扰（历史消息不动）
                     val requestMessages =
                         if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount)
