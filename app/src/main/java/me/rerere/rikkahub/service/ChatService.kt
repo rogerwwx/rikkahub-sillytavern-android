@@ -149,6 +149,7 @@ import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.memory.CrossWindowMemoryStore
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.selectNonEmptyBranches
 import me.rerere.rikkahub.data.model.toMergedMessageNode
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
@@ -1765,13 +1766,14 @@ class ChatService(
                 fgJob?.cancel()
                 stopGenerationForeground()
 
-                // 可能被取消了，或者意外结束，兜底更新
+                // 可能被取消了，或者意外结束，兜底更新。
+                // 顺手把中断留下的空分支从选中位移开，旧回复不会因为这次取消而消失。
                 val updatedConversation = getConversationFlow(conversationId).value.copy(
                     messageNodes = getConversationFlow(conversationId).value.messageNodes.map { node ->
                         node.copy(messages = node.messages.map { it.finishReasoning() })
                     },
                     updateAt = Instant.now()
-                )
+                ).selectNonEmptyBranches()
                 updateConversation(conversationId, updatedConversation)
 
                 // 生成结束：取消 Live Update 通知，后台时发送完成通知

@@ -72,6 +72,18 @@ data class Conversation(
         return messageNodes.firstOrNull { node -> node.messages.any { it.id == messageId } }
     }
 
+    /**
+     * 是否已经有可展示内容：正文、媒体或工具调用。
+     * 单独一段推理不算——思考气泡不该用来顶掉一条已经写完的回复。
+     */
+    private fun hasDisplayableContent(message: UIMessage): Boolean = message.parts.any { part ->
+        when (part) {
+            is UIMessagePart.Text -> part.text.isNotBlank()
+            is UIMessagePart.Reasoning -> false
+            else -> true
+        }
+    }
+
     fun updateCurrentMessages(messages: List<UIMessage>): Conversation {
         val newNodes = this.messageNodes.toMutableList()
         val nodeIndexes = mutableMapOf<Uuid, Int>()
@@ -79,6 +91,10 @@ data class Conversation(
         val visibleNodeIndexes = newNodes.indices.filter { !newNodes[it].currentMessage.isContextHidden }
 
         messages.forEachIndexed { index, message ->
+            // 生成刚开始时会先推一条空消息占位。此时若直接建分支并选中，旧回复会在出字之前
+            // 就被切走；生成被取消后更只剩一条空分支，看起来就是"回复被吃掉了"。所以先不写入，
+            // 等真正有正文、媒体或工具调用再落库。
+            if (message.id !in nodeIndexes && !hasDisplayableContent(message)) return@forEachIndexed
             // 生成输入只含可见消息；已有消息按稳定ID定位，新分支才沿可见节点对齐。
             val nodeIndex = nodeIndexes[message.id] ?: visibleNodeIndexes.getOrNull(index) ?: newNodes.size
             val node = newNodes
@@ -130,6 +146,26 @@ data class Conversation(
             node.copy(messages = node.messages.toMutableList().also { it[existing] = message })
         }
         return copy(messageNodes = messageNodes.toMutableList().also { it[index] = updated })
+    }
+
+    /**
+     * 选中分支没有可展示内容（生成被取消、模型只返回推理后中断）时，退回同一节点里最近的非空分支。
+     *
+     * 旧行为会把空分支写进库并留在选中位，表现是"重新生成后旧回复再也看不到"。
+     * 打开对话时也跑一次，可以让已经被顶掉的回复重新显示出来（分支一直留在节点的 messages 里）。
+     */
+    fun selectNonEmptyBranches(): Conversation {
+        var changed = false
+        val repaired = messageNodes.map { node ->
+            val selected = node.messages.getOrNull(node.selectIndex) ?: return@map node
+            if (hasDisplayableContent(selected)) return@map node
+            val fallback = node.messages.indices
+                .filter { it != node.selectIndex && hasDisplayableContent(node.messages[it]) }
+                .minByOrNull { kotlin.math.abs(it - node.selectIndex) } ?: return@map node
+            changed = true
+            node.copy(selectIndex = fallback)
+        }
+        return if (changed) copy(messageNodes = repaired) else this
     }
 
     companion object {
