@@ -305,7 +305,7 @@ class ChatVM(
     /**
      * 压缩上下文
      */
-    fun handleCompressContext(additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int): Job {
+    fun handleCompressContext(additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean): Job {
         compressDraft.value = null
         return viewModelScope.launch {
             try {
@@ -316,6 +316,8 @@ class ChatVM(
                     targetTokens,
                     keepRecentMessages,
                     onDraft = { compressDraft.value = it },
+                    historyAsMessages = historyAsMessages,
+                    bufferedText = bufferedText,
                 ).onFailure {
                     chatService.addError(it, title = context.getString(R.string.error_title_compress_conversation))
                 }

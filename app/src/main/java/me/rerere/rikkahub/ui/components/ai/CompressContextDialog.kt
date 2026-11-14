@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.ui.components.ai
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -46,11 +49,13 @@ fun CompressContextDialog(
     // 助手未开启「压缩／记忆流式」时，压缩一次返回全部结果，没有可看的中间过程，就不显示草稿框。
     streaming: Boolean,
     draft: String?,
-    onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int) -> Job
+    onConfirm: (additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int, historyAsMessages: Boolean, bufferedText: Boolean) -> Job
 ) {
     var additionalPrompt by remember { mutableStateOf("") }
     var selectedTokens by remember { mutableIntStateOf(2000) }
     var keepRecentMessages by remember { mutableIntStateOf(32) }
+    var historyAsMessages by remember { mutableStateOf(false) }
+    var bufferedText by remember { mutableStateOf(false) }
     val tokenOptions = listOf(500, 4000)
     var customMode by remember { mutableStateOf(false) }
     var customText by remember { mutableStateOf("2000") }
@@ -79,6 +84,7 @@ fun CompressContextDialog(
         },
         text = {
             Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 if (isLoading) {
@@ -162,6 +168,56 @@ fun CompressContextDialog(
                         maxLines = 4,
                     )
 
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.chat_page_compress_history_compat),
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = historyAsMessages,
+                                onCheckedChange = {
+                                    historyAsMessages = it
+                                    if (it) bufferedText = false
+                                },
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.chat_page_compress_history_compat_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.chat_page_compress_buffered_text),
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = bufferedText,
+                                onCheckedChange = {
+                                    bufferedText = it
+                                    if (it) historyAsMessages = false
+                                },
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.chat_page_compress_buffered_text_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
                     // 原文保留在聊天窗口，后续请求使用摘要与保留消息。
                     Text(
                         text = stringResource(R.string.chat_page_compress_warning),
@@ -220,7 +276,7 @@ fun CompressContextDialog(
                 TextButton(
                     enabled = !customMode || customTokens != null,
                     onClick = {
-                        currentJob = onConfirm(additionalPrompt, effectiveTokens, keepRecentMessages)
+                        currentJob = onConfirm(additionalPrompt, effectiveTokens, keepRecentMessages, historyAsMessages, bufferedText)
                     }
                 ) {
                     Text(stringResource(R.string.confirm))
