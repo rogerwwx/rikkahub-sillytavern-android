@@ -32,15 +32,17 @@ class SemanticJevAssist(
         val config = settings.dream.normalized()
         if (!config.jevEnabled || !config.jevRecall) return result
         val normalized = settings.normalized()
-        // 粗召回按融合顺序取前 N 条；核心记忆即使落在 N 之后也补进候选池，
+        // 候选池按 N 保住两路各自的头部，再按融合序补足；核心记忆即使落在 N 之后也补进池，
         // 否则"相关核心优先名额"会因为重排而静默失效（上限 N + coreBudget）。
         val ranked = result.candidates.ifEmpty { result.hits }
-        val head = ranked.take(config.jevCandidateCount)
+        val fusionRankById = ranked.withIndex().associate { (index, hit) -> hit.memory.id to index + 1 }
+        val head = selectRerankPool(ranked, config.jevCandidateCount)
         val coreOutside = result.hits.filter { it.memory.isCore && head.none { h -> h.memory.id == it.memory.id } }
             .take(normalized.coreBudget)
         val pool = (head + coreOutside).distinctBy { it.memory.id }
         if (pool.isEmpty()) return result
-        val items = pool.mapIndexed { index, hit -> RerankItem(hit, index) }
+        // position 只是池内请求序号（r<ID>）；诊断里的融合排名单独取自真实 candidates 顺序。
+        val items = pool.mapIndexed { index, hit -> RerankItem(hit, index, fusionRankById[hit.memory.id]) }
         val state = JevPrompts.memoryRerankState(semanticRerankContext(query, recentContext))
         val started = System.nanoTime()
         val event = try { start(assistantId, conversationId, "recall_rerank") }
@@ -107,6 +109,23 @@ class SemanticJevAssist(
         }
     }
 
+    /**
+     * N 池：向量 ceil(N/2)、词法 floor(N/2) 各自取路内头部，去重后按融合序补足到 N，
+     * 最后仍按融合序稳定呈现。N=1 沿用融合首条；某路缺候选时空出的名额由另一路/融合序补。
+     */
+    internal fun selectRerankPool(ranked: List<SemanticRecallHit>, count: Int): List<SemanticRecallHit> {
+        val n = count.coerceIn(1, 100)
+        if (n == 1) return ranked.take(1)
+        val vectorHead = ranked.filter { it.rank.vectorRank != null }
+            .sortedBy { it.rank.vectorRank }.take((n + 1) / 2)
+        val lexicalHead = ranked.filter { it.rank.lexicalRank != null }
+            .sortedBy { it.rank.lexicalRank }.take(n / 2)
+        val ids = (vectorHead + lexicalHead + ranked).distinctBy { it.memory.id }
+            .take(n).map { it.memory.id }.toSet()
+        // 先保留两路头部并补足 ID，再按原融合序输出；同分重排不能无故后移补齐项。
+        return ranked.filter { it.memory.id in ids }.distinctBy { it.memory.id }
+    }
+
     private suspend fun start(assistantId: String, conversationId: String, purpose: String): SemanticDiagnosticEvent {
         repository.recoverInterruptedDiagnostics()
         return SemanticDiagnosticEvent(assistantId = assistantId, conversationId = conversationId,
@@ -141,7 +160,8 @@ class SemanticJevAssist(
                 // 必须显式包成 JsonPrimitive：JsonObjectBuilder 的 map put 会返回旧值，elvis 会误判为 null。
                 put("score", item.score?.let { JsonPrimitive(it) } ?: JsonNull)
                 put("kept", item.hit.memory.id in keptIds)
-                put("fusionRank", item.position + 1)
+                put("poolPosition", item.position + 1)
+                put("fusionRank", item.fusionRank?.let(::JsonPrimitive) ?: JsonNull)
                 put("finalRank", finalRank[item.hit.memory.id]?.let { JsonPrimitive(it) } ?: JsonNull)
                 put("contentHash", semanticContentHash(item.hit.memory.content))
             } }))
@@ -183,8 +203,11 @@ private class RerankBatchDiagnostic(val questions: Int, val contentChars: Int) {
 private fun safeError(error: Exception) = if (error is JevHttpException) "HTTP ${error.code}"
     else "辅助请求或协议失败（${error.javaClass.simpleName}）"
 
-/** 一条待重排候选：融合顺序位置、序列化后的 item 文本与独立问题，分数回填在这里。 */
-private class RerankItem(val hit: SemanticRecallHit, val position: Int) {
+/**
+ * 一条待重排候选：池内请求序号 [position]（r<ID> 与稳定排序用）、真实融合排名 [fusionRank]
+ * （取自 result.candidates 的顺序，池外核心为 null）、序列化后的 item 文本与独立问题。
+ */
+private class RerankItem(val hit: SemanticRecallHit, val position: Int, val fusionRank: Int?) {
     val text: String = semanticRerankItemText(hit.memory)
     val question: JevQuestion = JevPrompts.memoryRerank(text)
     var score: Double? = null

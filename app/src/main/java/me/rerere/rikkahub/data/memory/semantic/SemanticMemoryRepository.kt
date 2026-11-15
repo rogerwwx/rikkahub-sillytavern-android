@@ -272,22 +272,26 @@ class SemanticMemoryRepository(
                 var lexicalError = false
                 var vectorError = false
                 val rawVectorScores = mutableMapOf<String, Double>()
-                val limit = config.topK * config.candidateMultiplier
-                // 查询侧中文二元组与 jieba 词元一起 OR 连接：短查询和专有名词的切词差异由二元组补召回。
-                // jieba_query 无词元时用哨兵词占位，避免 MATCH 空串抛 SQLiteException。
-                // 两路及中文扩展读取相同查询；聊天追加的背景在入口限长，不能在此裁掉当前用户的尾部意图。
-                val bigramSuffix = semanticCjkBigramQuery(retrievalQuery).let { if (it.isEmpty()) "" else " OR " + it }
+                // 启用 Jev 时每路容量至少覆盖 N，保证重排池能拿到两路头部；关闭时保持原容量，不加请求。
+                val jevPool = config.dream.jevCandidateCount.takeIf { config.dream.jevEnabled && config.dream.jevRecall }
+                val limit = maxOf(config.topK * config.candidateMultiplier, jevPool ?: 0)
+                // 词法只检索"当前话题"：向量仍用完整 query，这里派生聚焦文本再由原生切词收敛成内容词 OR。
+                // 不再把全文所有跨词二元组同权并入主查询——那会把语气/动作词混进 BM25 主信号。
+                val lexicalFocus = semanticLexicalFocus(retrievalQuery)
+                val nativeTokens = if (lexicalFocus.isBlank()) "" else semanticNativeTokens(lexicalFocus)
+                val lexicalTerms = semanticLexicalTerms(lexicalFocus, nativeTokens.orEmpty())
+                val lexicalExpression = semanticLexicalExpression(lexicalTerms.atoms)
+                if (nativeTokens == null) filters["lexical_unsegmented"] = 1
                 val lexical = try {
-                    if (retrievalQuery.isBlank()) emptyList() else {
-                        // 用编号参数保持绑定顺序为 0..4（查询、助手、窗口、时间、条数）不变，
-                        // 二元组扩展作为第 6 个参数只在 SQL 文本里引用，避免改变既有 DAO 参数契约。
+                    if (retrievalQuery.isBlank() || lexicalExpression.isEmpty()) emptyList() else {
+                        // 绑定顺序保持 0..4（MATCH 表达式、助手、窗口、时间、条数）。
                         dao.lexical(SimpleSQLiteQuery("""SELECT m.id AS id, bm25(semantic_fts) AS score
                             FROM semantic_fts JOIN semantic_memory m ON m.id = semantic_fts.id
-                            WHERE semantic_fts MATCH (COALESCE(NULLIF(jieba_query(?1), ''), $SEMANTIC_NO_LEXICAL_TERM) || ?6)
+                            WHERE semantic_fts MATCH ?1
                             AND m.assistantId = ?2 AND m.conversationId = ?3 AND m.status = 'active'
                             AND (m.isCore = 1 OR m.expiresAt IS NULL OR m.expiresAt > ?4)
                             ORDER BY score ASC, m.id LIMIT ?5""", arrayOf<Any?>(
-                            retrievalQuery, assistantId, conversationId, now, limit, bigramSuffix)))
+                            lexicalExpression, assistantId, conversationId, now, limit)))
                             .map { it.id to it.score }
                     }
                 } catch (error: CancellationException) { throw error
@@ -368,18 +372,42 @@ class SemanticMemoryRepository(
                 val status = if (degraded.size == 2) "failure" else if (hits.isEmpty()) "empty" else "success"
                 val result = SemanticRecallResult(hits, lexical.size, vector.size, filters, degraded, duration, event.id,
                     candidates = candidates)
+                val fusionRankById = candidates.withIndex().associate { (index, hit) -> hit.memory.id to index + 1 }
                 dao.putEvent(event.copy(status = status, durationNanos = duration, detailJson = buildJsonObject {
                     put("lexicalCandidates", lexical.size); put("vectorCandidates", vector.size)
+                    // 词法视图只记策略/数量/哈希，不保存 query、词元明文或正文。
+                    put("lexicalStrategy", lexicalTerms.strategy)
+                    put("lexicalTermCount", lexicalTerms.atoms.size)
+                    put("lexicalFocusHash", semanticContentHash(lexicalFocus))
+                    put("lexicalMatchHash", semanticContentHash(lexicalExpression))
+                    jevPool?.let { put("jevCandidateCount", it) }
                     put("deduplicatedCandidates", ranked.size); put("recalled", hits.size); put("injected", 0)
                     put("fusionMode", SemanticRankingDefaults.FUSION_MODE.name.lowercase())
+                    // candidatePool 保持既有数字语义（候选池条数）；明细另用 candidateDetails，避免同名覆盖。
                     put("candidatePool", candidates.size)
+                    put("candidateDetails", JsonArray(candidates.take(SEMANTIC_DIAGNOSTIC_POOL_LIMIT)
+                        .mapIndexed { index, hit -> buildJsonObject {
+                            put("id", hit.memory.id)
+                            put("fusionRank", index + 1)
+                            put("lexicalRawScore", hit.rank.lexicalRawScore?.let(::JsonPrimitive) ?: JsonNull)
+                            put("lexicalRank", hit.rank.lexicalRank?.let(::JsonPrimitive) ?: JsonNull)
+                            put("vectorRank", hit.rank.vectorRank?.let(::JsonPrimitive) ?: JsonNull)
+                            put("vectorScore", hit.rank.vectorScore?.let(::JsonPrimitive) ?: JsonNull)
+                        } }))
+                    // 明细有上限：显式记录是否被截断，不能把截断后的明细当成完整全池。
+                    put("candidateDetailsLimit", SEMANTIC_DIAGNOSTIC_POOL_LIMIT)
+                    put("candidateDetailsTruncated", candidates.size > SEMANTIC_DIAGNOSTIC_POOL_LIMIT)
                     put("queryHash", semanticContentHash(retrievalQuery))
                     put("hits", JsonArray(hits.map { hit -> buildJsonObject {
                         put("id", hit.memory.id); put("version", hit.memory.contentVersion)
                         put("type", hit.memory.type); put("score", hit.rank.score)
                         put("lexicalScore", hit.rank.lexicalScore?.let(::JsonPrimitive) ?: JsonNull)
+                        put("lexicalRawScore", hit.rank.lexicalRawScore?.let(::JsonPrimitive) ?: JsonNull)
+                        put("lexicalRank", hit.rank.lexicalRank?.let(::JsonPrimitive) ?: JsonNull)
                         put("vectorScore", hit.rank.vectorScore?.let(::JsonPrimitive) ?: JsonNull)
+                        put("vectorRank", hit.rank.vectorRank?.let(::JsonPrimitive) ?: JsonNull)
                         put("vectorRanked", hit.rank.vectorRanked)
+                        put("fusionRank", fusionRankById[hit.memory.id]?.let(::JsonPrimitive) ?: JsonNull)
                     } }))
                     put("degraded", degraded.joinToString("；"))
                     filters.forEach { (key, count) -> put(key, count) }
@@ -395,6 +423,22 @@ class SemanticMemoryRepository(
                 throw error
             }
         }
+
+    /**
+     * 读原生 jieba_query 的切词结果：复用现有只读连接与 Cursor，不新增 DAO 接口或 schema。
+     * 失败/不可用时返回 null，词法退化为中文二元组补召回。
+     */
+    private suspend fun semanticNativeTokens(focus: String): String? = withContext(Dispatchers.IO) {
+        try {
+            database.openHelper.readableDatabase.query("SELECT COALESCE(jieba_query(?), '')", arrayOf(focus))
+                .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else "" }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            // 原生切词不可用只降级词法策略，不能吞掉取消。
+            null
+        }
+    }
 
     suspend fun recordInjection(result: SemanticRecallResult) {
         val event = dao.getEvent(result.eventId) ?: return
@@ -433,6 +477,9 @@ private fun readableEmbeddingError(error: Exception): String {
     return if (status != null) "Embedding 请求失败：HTTP $status" else
         "Embedding 请求或响应校验失败（${error.javaClass.simpleName}）"
 }
+
+/** 诊断里候选全池的上限：只够定位"排在哪"，不把整库写进事件。 */
+private const val SEMANTIC_DIAGNOSTIC_POOL_LIMIT = 200
 
 fun SemanticRecallResult.prompt(): String = if (hits.isEmpty()) "" else buildString {
     appendLine(SEMANTIC_PROMPT_HEADER)

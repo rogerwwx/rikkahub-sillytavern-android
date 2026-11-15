@@ -45,13 +45,23 @@ object SemanticVectors {
     }
 }
 
-/** 融合前的单条候选；score 为当前阶段的分数（融合分数或加权后的最终分数）。 */
+/**
+ * 融合前的单条候选；score 为当前阶段的分数（融合分数或加权后的最终分数）。
+ *
+ * [lexicalScore]/[vectorScore] 是**参与融合的口径**（词法为本次归一化值、向量为入榜余弦）；
+ * [lexicalRawScore] 是 FTS5 原始 bm25（越小越相关，负数属正常）；
+ * [lexicalRank]/[vectorRank] 是各自路线**实际参与融合**的 1-based 名次，
+ * 只在候选确实位于该路线内（已过阈值/去重）时非空，绝不从回填的余弦反推。
+ */
 data class SemanticRankHit(
     val id: String,
     val lexicalScore: Double?,
     val vectorScore: Double?,
     val score: Double,
     val vectorRanked: Boolean = vectorScore != null,
+    val lexicalRawScore: Double? = null,
+    val lexicalRank: Int? = null,
+    val vectorRank: Int? = null,
 )
 
 enum class SemanticFusionMode { SCORE, RRF }
@@ -112,9 +122,6 @@ fun semanticCjkBigrams(tokens: List<String>, text: String): List<String> {
     return merged.distinct()
 }
 
-/** jieba 查询无词元时的占位词：FTS5 不接受空 MATCH 串，且该词元不会命中任何记忆。 */
-const val SEMANTIC_NO_LEXICAL_TERM = "\"__semantic_no_terms__\""
-
 /** 把查询文本的中文二元组拼成 FTS5 的 OR 表达式；没有中文时返回空串。 */
 fun semanticCjkBigramQuery(text: String): String =
     semanticCjkBigrams(emptyList(), text).joinToString(" OR ") { "\"" + it.replace("\"", "\"\"") + "\"" }
@@ -131,6 +138,7 @@ fun fuseSemanticScores(
     bm25Weight: Double = SemanticRankingDefaults.BM25_WEIGHT,
     agreementBonus: Double = SemanticRankingDefaults.AGREEMENT_BONUS,
     limit: Int = Int.MAX_VALUE,
+    rawLexicalScores: Map<String, Double> = emptyMap(),
 ): List<SemanticRankHit> {
     val lexicalRoute = finiteSemanticRoute(lexical)
     val vectorRoute = finiteSemanticRoute(vector)
@@ -152,6 +160,7 @@ fun fuseSemanticScores(
     val vectorNorm = normalize(vectorRoute)
     val lexicalScores = lexicalRoute.toMap()
     val vectorScores = vectorRoute.toMap()
+    val lexicalRawScores = rawLexicalScores
     val span = maxOf(lexicalRoute.size, vectorRoute.size, 1)
     val weightTotal = (if (lexicalRoute.isNotEmpty()) weight else 0.0) +
         (if (vectorRoute.isNotEmpty()) 1.0 - weight else 0.0)
@@ -171,7 +180,12 @@ fun fuseSemanticScores(
             lexicalPosition ?: (lexicalRoute.size + 1),
             vectorPosition ?: (vectorRoute.size + 1),
         )
-        Scored(SemanticRankHit(id, lexicalScores[id], vectorScores[id], score), bestRank)
+        Scored(SemanticRankHit(id, lexicalScores[id], vectorScores[id], score,
+            vectorRanked = vectorPosition != null,
+            lexicalRawScore = lexicalRawScores[id],
+            lexicalRank = lexicalPosition?.plus(1),
+            vectorRank = vectorPosition?.plus(1),
+        ), bestRank)
     }.sortedWith(
         compareByDescending<Scored> { it.hit.score }.thenBy { it.bestRank }.thenBy { it.hit.id }
     )
@@ -194,7 +208,10 @@ fun fuseSemanticRrf(
     val scores = linkedMapOf<String, Double>()
     lexicalRank.forEach { (id, rank) -> scores[id] = (scores[id] ?: 0.0) + 1.0 / (k + rank + 1) }
     vectorRank.forEach { (id, rank) -> scores[id] = (scores[id] ?: 0.0) + 1.0 / (k + rank + 1) }
-    return scores.map { (id, score) -> SemanticRankHit(id, lexicalScores[id], vectorScores[id], score) }
+    return scores.map { (id, score) -> SemanticRankHit(id, lexicalScores[id], vectorScores[id], score,
+        vectorRanked = vectorRank[id] != null,
+        lexicalRank = lexicalRank[id]?.plus(1),
+        vectorRank = vectorRank[id]?.plus(1)) }
         .sortedWith(compareByDescending<SemanticRankHit> { it.score }.thenBy { it.id })
         .take(limit.coerceAtLeast(0))
 }
@@ -289,11 +306,17 @@ fun fuseSemanticRanks(
     if (capacity == 0) return emptyList()
     if (lexicalError && vectorError) return emptyList()
 
+    val rawLexical = finiteSemanticRoute(lexical).toMap()
+
     fun rankOnly(route: List<Pair<String, Double>>, scoreOf: (String) -> Double, fromVector: Boolean) =
         route.withIndex().map { (rank, item) ->
             SemanticRankHit(item.first, if (fromVector) null else scoreOf(item.first),
                 if (fromVector) scoreOf(item.first) else null,
-                1.0 / (rrfK + rank + 1))
+                1.0 / (rrfK + rank + 1),
+                vectorRanked = fromVector,
+                lexicalRawScore = if (fromVector) null else rawLexical[item.first],
+                lexicalRank = if (fromVector) null else rank + 1,
+                vectorRank = if (fromVector) rank + 1 else null)
         }.take(capacity)
 
     val lexicalNormalized = normalizeSemanticBm25(lexical)
@@ -304,7 +327,9 @@ fun fuseSemanticRanks(
         lexicalError -> rankOnly(vectorGated, { vectorScores.getValue(it) }, fromVector = true)
         vectorError -> rankOnly(lexicalNormalized, { lexicalScores.getValue(it) }, fromVector = false)
         mode == SemanticFusionMode.RRF -> fuseSemanticRrf(lexicalNormalized, vectorGated, rrfK, capacity)
-        else -> fuseSemanticScores(lexicalNormalized, vectorGated, limit = capacity)
+            .map { it.copy(lexicalRawScore = rawLexical[it.id]) }
+        else -> fuseSemanticScores(lexicalNormalized, vectorGated, limit = capacity,
+            rawLexicalScores = rawLexical)
     }
     return weightSemanticRanks(fused, importance).take(capacity)
 }

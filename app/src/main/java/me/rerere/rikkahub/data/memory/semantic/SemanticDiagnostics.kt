@@ -48,12 +48,52 @@ fun semanticDiagnostics(events: List<SemanticDiagnosticEvent>): SemanticDiagnost
         events.filter { it.error != null }.sortedByDescending { it.startedAt }.take(10))
 }
 
+/** 原始 bm25 可能是 -1e-6 量级：保留 6 位有效数字，绝不用 3 位小数把它显示成 0。 */
+internal fun formatRawBm25(value: Double): String =
+    if (value == 0.0) "0" else "%.6g".format(java.util.Locale.ROOT, value)
+
+/**
+ * 单条命中的分数说明（界面与诊断共用）。
+ *
+ * 必须区分三种情况：没有进入词法榜、进入词法榜但本次归一化为 0（最弱命中天然如此）、以及路内名次；
+ * 同时给出原始 bm25，避免把"归一化 0"读成"没有命中"。
+ */
+fun semanticRecallScoreLine(hit: SemanticRecallHit): String {
+    val lexical = when {
+        hit.rank.lexicalRank == null && hit.rank.lexicalScore == null -> "BM25 无（未进入词法榜）"
+        else -> "BM25 归一化 " + (hit.rank.lexicalScore?.let { "%.3f".format(it) } ?: "-") +
+            (hit.rank.lexicalRank?.let { "（词法第 " + it + "）" } ?: "")
+    }
+    val raw = hit.rank.lexicalRawScore?.let { "raw " + formatRawBm25(it) }
+    val vector = (hit.rank.vectorScore?.let { "余弦 " + "%.3f".format(it) } ?: "余弦 无") +
+        (hit.rank.vectorRank?.let { "（向量第 " + it + "）" } ?: "")
+    // 综合分 = 融合分 + 重要度加权（2:1）；不按现实时间做新鲜度衰减。
+    val note = if (hit.rank.vectorRanked) "" else " · 仅关键词入榜"
+    return listOfNotNull(lexical, raw, vector, "综合 " + "%.4f".format(hit.rank.score)).joinToString(" · ") + note
+}
+
+/**
+ * 召回事件的分数说明。
+ *
+ * BM25 是本次候选之间的相对归一化值（最弱命中就是 0），因此必须与"没有进入词法榜"分开表述，
+ * 并同时给出原始 bm25 与路内名次；原始值可能极小，用足够有效位显示，不四舍五入成 0。
+ */
 fun semanticRecallScoreLines(event: SemanticDiagnosticEvent): List<String> = runCatching {
     Json.parseToJsonElement(event.detailJson).jsonObject["hits"]?.jsonArray?.map { raw ->
         val hit = raw.jsonObject
-        val vectorRanked = hit["vectorRanked"]?.jsonPrimitive?.booleanOrNull
-            ?: (hit["vectorScore"]?.jsonPrimitive?.contentOrNull != null)
-        "${hit["id"]?.jsonPrimitive?.content} / v${hit["version"]?.jsonPrimitive?.content} / ${hit["type"]?.jsonPrimitive?.content}" +
-            "：BM25 ${hit["lexicalScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；余弦 ${hit["vectorScore"]?.jsonPrimitive?.contentOrNull ?: "无"}；综合 ${hit["score"]?.jsonPrimitive?.content}；向量参与 ${if (vectorRanked) "是" else "否"}"
+        fun text(key: String) = hit[key]?.jsonPrimitive?.contentOrNull
+        val vectorRanked = hit["vectorRanked"]?.jsonPrimitive?.booleanOrNull ?: (text("vectorScore") != null)
+        val lexicalRank = hit["lexicalRank"]?.jsonPrimitive?.intOrNull
+        val lexical = when {
+            text("lexicalScore") == null && lexicalRank == null -> "未进入词法榜"
+            else -> "BM25 归一化 " + (text("lexicalScore") ?: "-") +
+                (lexicalRank?.let { "（词法第 $it）" } ?: "")
+        }
+        val rawScore = text("lexicalRawScore")?.let { "raw $it" }
+        val vectorRank = hit["vectorRank"]?.jsonPrimitive?.intOrNull
+        val vector = (text("vectorScore") ?: "无") + (vectorRank?.let { "（向量第 $it）" } ?: "")
+        "${text("id")} / v${text("version")} / ${text("type")}：" +
+            listOfNotNull(lexical, rawScore, "余弦 $vector", "综合 ${text("score")}").joinToString("；") +
+            "；向量参与 ${if (vectorRanked) "是" else "否"}"
     } ?: emptyList()
 }.getOrDefault(emptyList())

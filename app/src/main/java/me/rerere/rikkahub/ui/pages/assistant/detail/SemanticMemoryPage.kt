@@ -1073,7 +1073,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                             Text(result.hits.size.toString() + " 条命中 · " +
                                 "%.1f".format(result.durationNanos / 1_000_000.0) + " ms",
                                 style = MaterialTheme.typography.labelMedium)
-                            Text("候选 BM25 " + result.lexicalCandidates + " · 向量 " + result.vectorCandidates +
+                            Text("候选 词法 " + result.lexicalCandidates + " · 向量 " + result.vectorCandidates +
                                 result.filters["jev_rerank_pool"]?.let { " · Jev 重排 " + it + " 条" }.orEmpty(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1085,7 +1085,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text(hit.memory.content, style = MaterialTheme.typography.bodySmall,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    Text(recallScoreLine(hit), style = MaterialTheme.typography.labelSmall,
+                                    Text(semanticRecallScoreLine(hit), style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.outline)
                                 }
                             }
@@ -1235,15 +1235,6 @@ private fun StatDivider() {
         modifier = Modifier.padding(vertical = 6.dp),
         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
     )
-}
-
-private fun recallScoreLine(hit: SemanticRecallHit): String {
-    val lexical = hit.rank.lexicalScore?.let { "BM25 " + "%.3f".format(it) } ?: "BM25 无"
-    val vector = hit.rank.vectorScore?.let { "余弦 " + "%.3f".format(it) } ?: "余弦 无"
-    // rank.score 现在是"融合分 + 重要度加权（2:1）"后的综合分；不按时间做新鲜度衰减。
-    val fused = "综合 " + "%.4f".format(hit.rank.score)
-    val note = if (hit.rank.vectorRanked) "" else " · 仅关键词入榜"
-    return lexical + " · " + vector + " · " + fused + note
 }
 
 private fun formatBytes(bytes: Long): String = when {

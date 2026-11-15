@@ -26,5 +26,24 @@ fun semanticDiagnosticsSmoke() {
     val rawOnly = events.last().copy(detailJson = """{"hits":[{"id":"m1","version":1,"type":"factual","lexicalScore":-2.0,"vectorScore":0.2,"score":0.01,"vectorRanked":false}]}""")
     val line = semanticRecallScoreLines(rawOnly).single()
     check(line.contains("余弦 0.2") && line.contains("向量参与 否"))
+    val lexicalHit = SemanticRecallHit(
+        SemanticMemoryEntity(id = "lexical", assistantId = "a", conversationId = "window",
+            content = "词法诊断样本", type = "factual"),
+        SemanticRankHit("lexical", 0.0, 0.2, 0.3, vectorRanked = false,
+            lexicalRawScore = -1e-6, lexicalRank = 7),
+    )
+    val lexicalLine = semanticRecallScoreLine(lexicalHit)
+    check(lexicalLine.contains("BM25 归一化 0.000") && lexicalLine.contains("词法第 7"))
+    check(lexicalLine.contains("raw -1.00000e-06") && lexicalLine.contains("仅关键词入榜"))
+    check(!lexicalLine.contains("未进入词法榜") && !lexicalLine.contains("向量第"))
+    val vectorHit = lexicalHit.copy(rank = SemanticRankHit("vector", null, 0.8, 0.9, vectorRank = 1))
+    val vectorLine = semanticRecallScoreLine(vectorHit)
+    check(vectorLine.contains("未进入词法榜") && vectorLine.contains("向量第 1"))
+    check(!vectorLine.contains("raw ") && !vectorLine.contains("仅关键词入榜"))
+    val zeroEvent = rawOnly.copy(detailJson =
+        """{"hits":[{"id":"m1","version":1,"type":"factual","lexicalScore":0,"lexicalRawScore":-0.000001,"lexicalRank":7,"vectorScore":0.2,"score":0.3,"vectorRanked":false}]}""")
+    val zeroLine = semanticRecallScoreLines(zeroEvent).single()
+    check(zeroLine.contains("BM25 归一化 0") && zeroLine.contains("词法第 7"))
+    check(zeroLine.contains("raw -") && !zeroLine.contains("未进入词法榜"))
     println("PASS diagnostics: API/storage separation, purpose, cancellation/running, real durations, filters, assistant/library scope")
 }
