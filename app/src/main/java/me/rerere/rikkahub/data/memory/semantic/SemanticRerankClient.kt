@@ -13,9 +13,9 @@ class SemanticRerankClient(
     private val providerManager: ProviderManager,
 ) {
     data class Selection(val provider: ProviderSetting.OpenAI, val model: Model) {
-        fun parameters(query: String, documents: List<String>, instruction: String?, instructionField: String = "instruction") = RerankParams(
+        fun parameters(query: String, documents: List<String>, instruct: String?, siliconFlowInstruction: Boolean) = RerankParams(
             model = model, query = query, documents = documents,
-            customHeaders = model.customHeaders, customBody = model.customBodies, instruction = instruction, instructionField = instructionField,
+            customHeaders = model.customHeaders, customBody = model.customBodies, instruct = instruct, siliconFlowInstruction = siliconFlowInstruction,
         )
     }
 

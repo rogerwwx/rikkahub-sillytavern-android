@@ -7,10 +7,10 @@ data class RerankParams(
     val documents: List<String>,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBody: List<CustomBody> = emptyList(),
-    /** 仅在实际 HTTP 接口支持时发送，不按模型名称推断。 */
-    val instruction: String? = null,
-    /** Qwen 官方兼容接口用 instruct；其他明确支持 instruction 的接口仍可选择原字段。 */
-    val instructionField: String = "instruction",
+    /** Qwen 任务引导；普通重排留空，不按模型名称自动开启。 */
+    val instruct: String? = null,
+    /** 硅基流动 Qwen 使用 instruction；阿里云 Qwen 兼容接口使用 instruct。 */
+    val siliconFlowInstruction: Boolean = false,
 )
 
 data class RerankResult(val model: String, val scores: List<Double>, val usage: RerankUsage? = null)

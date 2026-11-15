@@ -113,8 +113,8 @@ fun buildRerankRequestBody(params: RerankParams): JsonObject {
     require(params.customBody.none { it.key in setOf("model", "query", "documents", "top_n", "return_documents") }) {
         "重排 model/query/documents/top_n/return_documents 不可由自定义请求体覆盖"
     }
-    require(params.instructionField in setOf("instruct", "instruction")) { "重排引导字段不受支持" }
-    require(params.instruction == null || params.customBody.none { it.key == params.instructionField }) {
+    val instructField = if (params.siliconFlowInstruction) "instruction" else "instruct"
+    require(params.instruct == null || params.customBody.none { it.key == instructField }) {
         "重排引导不可同时由选项与自定义请求体提供"
     }
     return buildJsonObject {
@@ -123,7 +123,7 @@ fun buildRerankRequestBody(params: RerankParams): JsonObject {
         put("documents", JsonArray(params.documents.map(::JsonPrimitive)))
         put("top_n", params.documents.size)
         put("return_documents", false)
-        params.instruction?.takeIf { it.isNotBlank() }?.let { put(params.instructionField, it) }
+        params.instruct?.takeIf { it.isNotBlank() }?.let { put(instructField, it) }
     }.mergeCustomBody(params.customBody)
 }
 

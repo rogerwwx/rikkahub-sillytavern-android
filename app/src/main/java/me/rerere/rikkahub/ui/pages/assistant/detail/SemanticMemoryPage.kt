@@ -885,7 +885,11 @@ private fun SemanticSettingsPanel(
             Text("对基础召回候选重新排序，沿用上方的核心优先名额，最多取 TopK 条供聊天或做梦使用。",
                 style = MaterialTheme.typography.bodySmall)
             ModelSelector(modelId = config.dream.rerankModelId, providers = providers, type = ModelType.RERANK,
-                onSelect = { model -> configure { old -> old.copy(dream = old.dream.copy(rerankModelId = model.id)) } })
+                onSelect = { model -> configure { old ->
+                    // 换模型先关闭引导，避免普通 BGE 继承 Qwen 的请求字段。
+                    old.copy(dream = old.dream.copy(rerankModelId = model.id,
+                        rerankInstructionMode = if (old.dream.rerankModelId == model.id) old.dream.rerankInstructionMode else "none"))
+                } })
             if (config.dream.rerankModelId == null) {
                 Text("当前使用 Jev，连接在「设置 → 华灯 → Jev」配置。", style = MaterialTheme.typography.bodySmall)
             } else {
@@ -905,22 +909,21 @@ private fun SemanticSettingsPanel(
                 }
                 Text("只调用所选专用模型；模型失效、超时或重排失败时回退基础召回，不会再调用 Jev。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("引导传递方式", style = MaterialTheme.typography.labelMedium)
+                Text("Qwen 引导协议", style = MaterialTheme.typography.labelMedium)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("none" to "关闭（默认，普通 BGE）", "query" to "拼入 query",
-                        "instruct" to "Qwen instruct", "instruction" to "其他 instruction 接口").forEach { (mode, label) ->
+                    listOf("none" to "关闭（默认，普通 BGE）",
+                        "instruct" to "阿里云 Qwen", "siliconflow" to "硅基流动 Qwen").forEach { (mode, label) ->
                         FilterChip(selected = config.dream.rerankInstructionMode == mode,
                             onClick = { configure { old -> old.copy(dream = old.dream.copy(rerankInstructionMode = mode)) } },
                             label = { Text(label) })
                     }
                 }
                 Text(when (config.dream.rerankInstructionMode) {
-                    "query" -> "仅将引导文本拼入 query，不等价于 Qwen 原生 Instruct。"
-                    "instruct" -> "发送顶层 instruct 字段，对应 Qwen 官方兼容接口 /reranks；DashScope 原生嵌套接口不适用。中转服务须确认支持此字段。"
-                    "instruction" -> "只用于其他明确支持 instruction 字段的接口；Qwen 官方字段是 instruct，不是 instruction。"
+                    "instruct" -> "阿里云 Qwen 兼容接口 /reranks 使用顶层 instruct；DashScope 原生嵌套接口不适用。"
+                    "siliconflow" -> "硅基流动 /rerank 使用 instruction，仅用于其支持的 Qwen Reranker，不用于普通 BGE。"
                     else -> "不发送引导文本，普通 BGE 等模型默认使用此方式；不会根据模型名称自动开启引导。"
                 }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (config.dream.rerankInstructionMode != "none") {
+                if (config.dream.rerankInstructionMode in setOf("instruct", "siliconflow")) {
                     var instructionDraft by remember(config.dream.rerankModelId, config.dream.rerankInstruction) {
                         mutableStateOf(config.dream.rerankInstruction.ifBlank { DEFAULT_SEMANTIC_RERANK_INSTRUCTION })
                     }

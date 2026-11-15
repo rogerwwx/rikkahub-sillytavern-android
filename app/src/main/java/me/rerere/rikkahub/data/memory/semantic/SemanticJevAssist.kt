@@ -53,9 +53,8 @@ class SemanticJevAssist(
         val dedicated = config.rerankModelId != null
         val backend = if (dedicated) "http" else "jev"
         val guidance = config.rerankInstruction.ifBlank { DEFAULT_SEMANTIC_RERANK_INSTRUCTION }
-        val rerankQuery = if (config.rerankInstructionMode == "query") "$guidance\n\n$context" else context
-        val instruction = guidance.takeIf { config.rerankInstructionMode in setOf("instruct", "instruction") }
-        val instructionField = if (config.rerankInstructionMode == "instruct") "instruct" else "instruction"
+        val instruct = guidance.takeIf { config.rerankInstructionMode in setOf("instruct", "siliconflow") }
+        val siliconFlowInstruction = config.rerankInstructionMode == "siliconflow"
         val started = System.nanoTime()
         val event = try { start(assistantId, conversationId, "recall_rerank") }
         catch (cancel: CancellationException) { throw cancel }
@@ -73,7 +72,7 @@ class SemanticJevAssist(
             val (batches, skipped) = try {
                 if (failure != null) emptyList<List<RerankItem>>() to 0
                 else planRerankBatches(state, items, selection?.let { selected -> { batch ->
-                    requireNotNull(reranker).requestBytes(selected.parameters(rerankQuery, batch.map { it.text }, instruction, instructionField))
+                    requireNotNull(reranker).requestBytes(selected.parameters(context, batch.map { it.text }, instruct, siliconFlowInstruction))
                 } })
             } catch (error: Exception) { failure = safeError(error); emptyList<List<RerankItem>>() to 0 }
             if (failure == null) failure = if (batches.isEmpty()) "候选或检索上下文超出 64KB 请求体预算"
@@ -88,7 +87,7 @@ class SemanticJevAssist(
                     val response = try {
                         if (selection != null) {
                             val response = requireNotNull(reranker).rerank(selection,
-                                selection.parameters(rerankQuery, batch.map { it.text }, instruction, instructionField)) { diagnostic.httpRequest = it }
+                                selection.parameters(context, batch.map { it.text }, instruct, siliconFlowInstruction)) { diagnostic.httpRequest = it }
                             require(response.scores.size == batch.size && response.scores.all { it.isFinite() }) { "重排评分不完整或非法" }
                             batch.mapIndexed { index, item -> "r${item.position}" to response.scores[index] }.toMap()
                         } else client.judge(state, questions, 10000, 1) { diagnostic.request = it }.mapValues { it.value.score }

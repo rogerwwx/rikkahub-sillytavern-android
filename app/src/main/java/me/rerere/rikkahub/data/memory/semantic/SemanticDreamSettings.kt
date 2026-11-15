@@ -46,7 +46,7 @@ data class SemanticDreamSettings(
     val jevCandidateCount: Int = 20,
     /** null 沿用 Jev；明确选择专用模型后失败只回退基础召回。 */
     val rerankModelId: Uuid? = null,
-    /** none 不引导；query 拼入查询；instruct 用 Qwen 官方扁平字段；instruction 用其他接口的同名字段。 */
+    /** none 普通重排；instruct 阿里云 Qwen；siliconflow 硅基流动 Qwen。 */
     val rerankInstructionMode: String = "none",
     val rerankInstruction: String = "",
 ) {
@@ -71,7 +71,7 @@ data class SemanticDreamSettings(
             unknownTtlDays = unknownTtlDays.coerceIn(1, 3650),
             jevTimeoutMillis = jevTimeoutMillis.coerceIn(250, 10000),
             jevCandidateCount = jevCandidateCount.coerceIn(1, 100),
-            rerankInstructionMode = rerankInstructionMode.takeIf { it in setOf("none", "query", "instruct", "instruction") } ?: "none",
+            rerankInstructionMode = rerankInstructionMode.takeIf { it in setOf("none", "instruct", "siliconflow") } ?: "none",
         )
     }
 
