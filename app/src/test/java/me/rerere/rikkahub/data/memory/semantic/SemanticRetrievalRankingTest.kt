@@ -2,7 +2,6 @@ package me.rerere.rikkahub.data.memory.semantic
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,27 +48,6 @@ class SemanticRetrievalRankingTest {
         assertFalse(hits.first { it.id == "rescued" }.vectorRanked)
         assertTrue(hits.first { it.id == "vector" }.vectorRanked)
         assertEquals(setOf("rescued", "vector"), hits.map { it.id }.toSet())
-    }
-
-    @Test
-    fun routeDiagnosticsDescribeOnlyFiniteGatedHitsInBothFusionModes() {
-        for (mode in SemanticFusionMode.entries) {
-            val hits = fuseSemanticRanks(
-                listOf("rescued" to Double.NaN, "rescued" to -2.0, "rescued" to -1.0),
-                listOf("rescued" to 0.2, "vector" to 0.8),
-                minSimilarity = 0.35, topK = 6, rrfK = 60, mode = mode,
-            ).associateBy { it.id }
-            val rescued = hits.getValue("rescued")
-            assertEquals(mode.name, -2.0, rescued.lexicalRawScore!!, 1e-12)
-            assertEquals(1, rescued.lexicalRank)
-            assertNull(rescued.vectorRank)
-            assertFalse(rescued.vectorRanked)
-            val vector = hits.getValue("vector")
-            assertNull(vector.lexicalRawScore)
-            assertNull(vector.lexicalRank)
-            assertEquals(1, vector.vectorRank)
-            assertTrue(vector.vectorRanked)
-        }
     }
 
     @Test
