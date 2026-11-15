@@ -63,6 +63,7 @@ import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.hugeicons.stroke.Upload02
 import me.rerere.hugeicons.stroke.ViewOff
 import me.rerere.rikkahub.data.memory.semantic.*
+import me.rerere.rikkahub.data.memory.semantic.DEFAULT_SEMANTIC_RERANK_INSTRUCTION
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import me.rerere.rikkahub.ui.components.nav.BackButton
@@ -808,7 +809,7 @@ private fun DreamMetric(label: String, value: Int, tone: Color, modifier: Modifi
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SemanticSettingsPanel(
     config: SemanticMemorySettings,
@@ -871,9 +872,9 @@ private fun SemanticSettingsPanel(
                 configure { old -> old.copy(dream = transform(old.dream)) }
             }
         }
-        SemanticMemorySection("Jev 召回重排", HugeIcons.AiMagic) {
+        SemanticMemorySection("召回重排", HugeIcons.AiMagic) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("启用 Jev 重排", Modifier.weight(1f))
+                Text("启用召回重排", Modifier.weight(1f))
                 Switch(
                     checked = config.dream.jevEnabled && config.dream.jevRecall,
                     onCheckedChange = { enabled -> configure { old ->
@@ -881,10 +882,64 @@ private fun SemanticSettingsPanel(
                     } },
                 )
             }
-            Text("按记忆对本轮角色扮演的帮助程度评分，考虑人物关系、共同经历、偏好与剧情连续性。沿用上方的核心优先名额，最多取 TopK 条供聊天或做梦使用。",
+            Text("对基础召回候选重新排序，沿用上方的核心优先名额，最多取 TopK 条供聊天或做梦使用。",
                 style = MaterialTheme.typography.bodySmall)
+            ModelSelector(modelId = config.dream.rerankModelId, providers = providers, type = ModelType.RERANK,
+                onSelect = { model -> configure { old -> old.copy(dream = old.dream.copy(rerankModelId = model.id)) } })
+            if (config.dream.rerankModelId == null) {
+                Text("当前使用 Jev，连接在「设置 → 华灯 → Jev」配置。", style = MaterialTheme.typography.bodySmall)
+            } else {
+                TextButton(onClick = { configure { old -> old.copy(dream = old.dream.copy(rerankModelId = null)) } }) {
+                    Text("清除专用模型，改用 Jev")
+                }
+                val rerankOwner = providers.firstOrNull { provider -> provider.models.any { it.id == config.dream.rerankModelId } }
+                val rerankModel = rerankOwner?.models?.firstOrNull { it.id == config.dream.rerankModelId }
+                val rerankProvider = rerankModel?.providerOverwrite ?: rerankOwner
+                when {
+                    rerankModel == null || rerankModel.type != ModelType.RERANK ->
+                        Text("所选重排模型已失效或类型不符，原模型 ID 已保留；请重新选择或清除。", color = MaterialTheme.colorScheme.error)
+                    rerankOwner?.enabled != true || rerankModel.providerOverwrite?.enabled == false ->
+                        Text("所选模型的所属供应商或覆盖供应商已禁用，原模型 ID 已保留。", color = MaterialTheme.colorScheme.error)
+                    rerankProvider !is ProviderSetting.OpenAI ->
+                        Text("专用重排仅支持 OpenAI 兼容供应商；当前最终供应商类型不受支持，原模型 ID 已保留。", color = MaterialTheme.colorScheme.error)
+                }
+                Text("只调用所选专用模型；模型失效、超时或重排失败时回退基础召回，不会再调用 Jev。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("引导传递方式", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("none" to "关闭（默认，普通 BGE）", "query" to "拼入 query",
+                        "instruct" to "Qwen instruct", "instruction" to "其他 instruction 接口").forEach { (mode, label) ->
+                        FilterChip(selected = config.dream.rerankInstructionMode == mode,
+                            onClick = { configure { old -> old.copy(dream = old.dream.copy(rerankInstructionMode = mode)) } },
+                            label = { Text(label) })
+                    }
+                }
+                Text(when (config.dream.rerankInstructionMode) {
+                    "query" -> "仅将引导文本拼入 query，不等价于 Qwen 原生 Instruct。"
+                    "instruct" -> "发送顶层 instruct 字段，对应 Qwen 官方兼容接口 /reranks；DashScope 原生嵌套接口不适用。中转服务须确认支持此字段。"
+                    "instruction" -> "只用于其他明确支持 instruction 字段的接口；Qwen 官方字段是 instruct，不是 instruction。"
+                    else -> "不发送引导文本，普通 BGE 等模型默认使用此方式；不会根据模型名称自动开启引导。"
+                }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (config.dream.rerankInstructionMode != "none") {
+                    var instructionDraft by remember(config.dream.rerankModelId, config.dream.rerankInstruction) {
+                        mutableStateOf(config.dream.rerankInstruction.ifBlank { DEFAULT_SEMANTIC_RERANK_INSTRUCTION })
+                    }
+                    OutlinedTextField(value = instructionDraft, onValueChange = { instructionDraft = it },
+                        label = { Text("重排引导") }, minLines = 3, modifier = Modifier.fillMaxWidth(),
+                        supportingText = { Text("留空时使用与 Jev 同口径的默认 RP 引导，按 Qwen 官方建议写成英文；编辑后点击保存生效。") })
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { configure { old -> old.copy(dream = old.dream.copy(rerankInstruction = instructionDraft)) } }) {
+                            Text("保存引导")
+                        }
+                        TextButton(onClick = {
+                            instructionDraft = DEFAULT_SEMANTIC_RERANK_INSTRUCTION
+                            configure { old -> old.copy(dream = old.dream.copy(rerankInstruction = "")) }
+                        }) { Text("恢复默认") }
+                    }
+                }
+            }
             if (config.dream.jevEnabled && config.dream.jevRecall) {
-                NumberSetting("重排候选条数（1—100）", config.dream.jevCandidateCount.toString()) { raw ->
+                NumberSetting("重排候选条数（1—100，默认 20）", config.dream.jevCandidateCount.toString()) { raw ->
                     raw.toIntOrNull()?.takeIf { it in 1..100 }?.let { value ->
                         configure { old -> old.copy(dream = old.dream.copy(jevCandidateCount = value)) }
                     }
@@ -895,7 +950,7 @@ private fun SemanticSettingsPanel(
                     }
                 }
             }
-            Text("连接在「设置 → 华灯 → Jev」配置。超时或评分失败时使用原召回结果；运行记录见「诊断」。",
+            Text("重排失败时使用基础召回结果；运行记录见「诊断」。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         SemanticMemorySection("高级检索", HugeIcons.Settings03) {
@@ -1074,7 +1129,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                                 "%.1f".format(result.durationNanos / 1_000_000.0) + " ms",
                                 style = MaterialTheme.typography.labelMedium)
                             Text("候选 词法 " + result.lexicalCandidates + " · 向量 " + result.vectorCandidates +
-                                result.filters["jev_rerank_pool"]?.let { " · Jev 重排 " + it + " 条" }.orEmpty(),
+                                result.filters["jev_rerank_pool"]?.let { " · 重排 " + it + " 条" }.orEmpty(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             result.degraded.forEach {
@@ -1134,7 +1189,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
         if (rerankEvents.isNotEmpty()) {
             item {
                 CardGroup(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                    title = { Text("最近 Jev 重排") }) {
+                    title = { Text("最近召回重排") }) {
                     rerankEvents.forEach { event ->
                         item(
                             headlineContent = { Text(relativeTime(event.startedAt) + " · " + statusLabel(event.status)) },

@@ -23,6 +23,10 @@ import me.rerere.ai.provider.EmbeddingGenerationResult
 import me.rerere.ai.provider.ImageEditParams
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelType
+import me.rerere.ai.provider.RerankParams
+import me.rerere.ai.provider.RerankResult
+import me.rerere.ai.provider.RerankCallDiagnostics
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderQuota
 import me.rerere.ai.provider.ProviderSetting
@@ -60,6 +64,16 @@ class OpenAIProvider(
 
     private val chatCompletionsAPI = ChatCompletionsAPI(client = client, keyRoulette = keyRoulette)
     private val responseAPI = ResponseAPI(client = client, keyRoulette = keyRoulette)
+    private val rerankAPI = OpenAIRerankAPI(client)
+
+    override val supportsRerank: Boolean = true
+
+    override suspend fun rerank(
+        providerSetting: ProviderSetting.OpenAI,
+        params: RerankParams,
+        onDiagnostics: ((RerankCallDiagnostics) -> Unit)?,
+    ): RerankResult = rerankAPI.rerank(providerSetting, params,
+        keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString()), onDiagnostics)
 
     override suspend fun listModels(providerSetting: ProviderSetting.OpenAI): List<Model> =
         withContext(Dispatchers.IO) {
@@ -87,6 +101,7 @@ class OpenAIProvider(
                 Model(
                     modelId = id,
                     displayName = id,
+                    type = if (id.contains("rerank", ignoreCase = true)) ModelType.RERANK else ModelType.CHAT,
                 )
             }
         }

@@ -103,6 +103,7 @@ sealed class ProviderSetting {
         var useResponseApi: Boolean = false,
         var includeHistoryReasoning: Boolean = true,
         var responsesPath: String = "/responses",
+        var rerankPath: String = "/rerank",
         // 由插件声明的供应商：值为插件 ID，插件卸载/停用后连同模型一起移除；用户自建的供应商为 null
         var pluginId: String? = null,
     ) : ApiKey() {

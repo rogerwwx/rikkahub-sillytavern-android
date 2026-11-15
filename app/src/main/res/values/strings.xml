@@ -2139,6 +2139,8 @@
   <string name="setting_provider_page_api_base_url">API Base Url</string>
   <string name="setting_provider_page_api_key">API Key</string>
   <string name="setting_provider_page_api_path">API Path</string>
+  <string name="setting_provider_page_rerank_api_path">重排 API 路径</string>
+  <string name="setting_provider_page_rerank_api_path_desc">默认 /rerank；留空时将 API Base Url 作为完整接口 URL。也可填写完整 http(s) 地址，但请求会携带该供应商的凭证（API Key 与自定义请求头），请仅使用可信接口。</string>
   <string name="setting_provider_page_avaliable_models">Avaliable Models</string>
   <string name="setting_provider_page_balance_info">"Get account balance "</string>
   <string name="setting_provider_page_balance_json_key">Result Json Key</string>
@@ -2190,6 +2192,7 @@
   <string name="setting_provider_page_provider_override_desc">Configure custom provider settings for this specific model. Will inherit common properties from parent provider.</string>
   <string name="setting_provider_page_qr_decode_failed">Failed to parse QR code: %s</string>
   <string name="setting_provider_page_reasoning">Reasoning</string>
+  <string name="setting_provider_page_rerank_model">重排</string>
   <string name="setting_provider_page_response_api">Response API</string>
   <string name="setting_provider_page_response_api_warning">Response API is OpenAI\'s next-generation API. Most providers do not support it. If you don\'t know what this is, don\'t enable it.</string>
   <string name="setting_provider_page_save">Save</string>

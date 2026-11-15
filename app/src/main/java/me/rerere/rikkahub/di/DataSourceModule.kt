@@ -261,7 +261,8 @@ val dataSourceModule = module {
         )
     }
 
-    single { me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist(get(), get()) }
+    single { me.rerere.rikkahub.data.memory.semantic.SemanticRerankClient(get(), get()) }
+    single { me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist(get(), get(), get()) }
 
     single(createdAtStart = true) {
         me.rerere.rikkahub.data.memory.semantic.SemanticDreamManager(get(), get(), get(), get(), get(), get())

@@ -356,6 +356,12 @@ private fun ProviderConfigureOpenAI(
             },
             enabled = !provider.builtIn,
         )
+        textFieldItem(
+            label = R.string.setting_provider_page_rerank_api_path,
+            value = provider.rerankPath,
+            onValueChange = { onEdit(provider.copy(rerankPath = it.trim())) },
+            supportingText = { Text(stringResource(R.string.setting_provider_page_rerank_api_path_desc)) },
+        )
     }
 
     CardGroup {

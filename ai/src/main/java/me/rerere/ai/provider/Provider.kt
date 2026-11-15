@@ -16,6 +16,14 @@ import kotlin.uuid.Uuid
 // 采用无状态设计，使用时除了需要传入需要的参数外，还需要传入provider setting作为参数
 interface Provider<T : ProviderSetting> {
     val supportsEmbedding: Boolean get() = false
+    val supportsRerank: Boolean get() = false
+
+    /** 专用相关性评分，不调用聊天生成接口。 */
+    suspend fun rerank(
+        providerSetting: T,
+        params: RerankParams,
+        onDiagnostics: ((RerankCallDiagnostics) -> Unit)? = null,
+    ): RerankResult = error("该提供商不支持重排")
 
     suspend fun listModels(providerSetting: T): List<Model>
 

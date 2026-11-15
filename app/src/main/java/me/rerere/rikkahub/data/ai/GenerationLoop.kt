@@ -366,7 +366,7 @@ class GenerationLoop(
     val semanticInput = buildSemanticRecallInput(messages, assistant.contextMessageLimit)
     suspend fun currentSemanticRevision(config: SemanticMemorySettings): String = semanticInput.cacheKey(
         semanticMemoryRepo.recallRevision(assistant.id.toString(), requireNotNull(conversationId).toString(), config),
-        if (config.dream.jevEnabled && config.dream.jevRecall) semanticJevAssist.configurationRevision() else "",
+        if (config.dream.jevEnabled && config.dream.jevRecall) semanticJevAssist.configurationRevision(config.dream) else "",
     )
     for (stepIndex in 0 until maxSteps) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")

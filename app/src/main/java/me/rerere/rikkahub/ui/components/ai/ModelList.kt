@@ -123,10 +123,10 @@ class ModelListState internal constructor(
     /**
      * 实际参与过滤的模型类型集合。
      *
-     * 供应商的 `/models` 接口只返回模型 id，拉回来的模型类型一律默认成 [ModelType.CHAT]，
-     * 除非用户在供应商详情页手动改过。生图页若严格按 [ModelType.IMAGE] 过滤，绝大多数用户
+     * 供应商的 `/models` 接口通常只返回模型 id；除可按名称识别的重排模型外，默认成 [ModelType.CHAT]，
+     * 也可在供应商详情页手动修改。生图页若严格按 [ModelType.IMAGE] 过滤，绝大多数用户
      * 看到的会是一个空列表——"选不了模型"就是这么来的。开启 fallbackToAllTypes 后，
-     * 只有当全局确实不存在该类型的模型时才退化成"除嵌入模型外全部可选"；一旦用户标了
+     * 只有当全局确实不存在该类型的模型时才退化成"仅聊天和生图模型可选"；一旦用户标了
      * 任意一个 IMAGE 模型，就恢复严格过滤，不会污染正常用法。
      *
      * 在 [update] 里算好存字段，而不是用 getter 现算：下游 `remember(providers, modelTypes)`
@@ -177,7 +177,7 @@ class ModelListState internal constructor(
             provider.models.fastAny { it.type == type }
         }
         if (hasExactType) return setOf(type)
-        return ModelType.entries.filterTo(mutableSetOf()) { it != ModelType.EMBEDDING }
+        return setOf(ModelType.CHAT, ModelType.IMAGE)
     }
 }
 
@@ -938,6 +938,7 @@ fun ModelTypeTag(model: Model) {
                     ModelType.CHAT -> R.string.setting_provider_page_chat_model
                     ModelType.EMBEDDING -> R.string.setting_provider_page_embedding_model
                     ModelType.IMAGE -> R.string.setting_provider_page_image_model
+                    ModelType.RERANK -> R.string.setting_provider_page_rerank_model
                 }
             )
         )

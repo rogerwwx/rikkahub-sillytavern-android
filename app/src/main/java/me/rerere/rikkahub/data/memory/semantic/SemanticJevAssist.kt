@@ -7,16 +7,21 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import me.rerere.rikkahub.data.ai.jev.*
+import me.rerere.ai.provider.RerankCallDiagnostics
+import me.rerere.ai.provider.providers.openai.RerankHttpException
 import java.util.Locale
 
 class SemanticJevAssist(
     private val client: JevClient,
     private val repository: SemanticMemoryRepository,
+    private val reranker: SemanticRerankClient? = null,
 ) {
-    suspend fun configurationRevision() = client.configurationRevision()
+    suspend fun configurationRevision(config: SemanticDreamSettings = SemanticDreamSettings()): String =
+        config.rerankModelId?.let { reranker?.configurationRevision(it) ?: "reranker-unavailable" }
+            ?: client.configurationRevision()
 
     /**
-     * 召回重排：粗召回候选池按 Jev 相关性降序，取语义记忆设置的 topK 作为注入结果。
+     * 召回重排：粗召回候选池按所选模型的相关性降序，取语义记忆设置的 topK 作为注入结果。
      *
      * 全部候选拿到分数后排序，沿用有限核心优先名额和 topK。任何一批缺答、非法值、
      * 超时或 HTTP 失败都返回原召回结果，同时记录原因；不判断草稿是否值得写入。
@@ -43,17 +48,36 @@ class SemanticJevAssist(
         if (pool.isEmpty()) return result
         // position 只是池内请求序号（r<ID>）；诊断里的融合排名单独取自真实 candidates 顺序。
         val items = pool.mapIndexed { index, hit -> RerankItem(hit, index, fusionRankById[hit.memory.id]) }
-        val state = JevPrompts.memoryRerankState(semanticRerankContext(query, recentContext))
+        val context = semanticRerankContext(query, recentContext)
+        val state = JevPrompts.memoryRerankState(context)
+        val dedicated = config.rerankModelId != null
+        val backend = if (dedicated) "http" else "jev"
+        val guidance = config.rerankInstruction.ifBlank { DEFAULT_SEMANTIC_RERANK_INSTRUCTION }
+        val rerankQuery = if (config.rerankInstructionMode == "query") "$guidance\n\n$context" else context
+        val instruction = guidance.takeIf { config.rerankInstructionMode in setOf("instruct", "instruction") }
+        val instructionField = if (config.rerankInstructionMode == "instruct") "instruct" else "instruction"
         val started = System.nanoTime()
         val event = try { start(assistantId, conversationId, "recall_rerank") }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { Log.w("SemanticJev", "无法记录重排诊断，使用基础召回"); return result }
-        val model = runCatching { client.modelVersion() }.getOrDefault("unknown")
-        val (batches, skipped) = planRerankBatches(state, items)
-        var failure: String? = if (batches.isEmpty()) "候选或检索上下文超出 64KB 请求体预算"
-            else if (skipped > 0) "$skipped 条候选超出 64KB 请求体预算，未评分" else null
+        var model = "unconfigured"
+        var failure: String? = null
         val batchDetails = mutableListOf<RerankBatchDiagnostic>()
         try {
+            val selection = try {
+                if (dedicated) requireNotNull(reranker) { "重排客户端未装配" }.select(requireNotNull(config.rerankModelId))
+                    .also { model = it.model.modelId }
+                else { model = client.modelVersion(); null }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (error: Exception) { failure = safeError(error); null }
+            val (batches, skipped) = try {
+                if (failure != null) emptyList<List<RerankItem>>() to 0
+                else planRerankBatches(state, items, selection?.let { selected -> { batch ->
+                    requireNotNull(reranker).requestBytes(selected.parameters(rerankQuery, batch.map { it.text }, instruction, instructionField))
+                } })
+            } catch (error: Exception) { failure = safeError(error); emptyList<List<RerankItem>>() to 0 }
+            if (failure == null) failure = if (batches.isEmpty()) "候选或检索上下文超出 64KB 请求体预算"
+                else if (skipped > 0) "$skipped 条候选超出 64KB 请求体预算，未评分" else null
             val completed = if (batches.isEmpty()) true else withTimeoutOrNull(config.jevTimeoutMillis.toLong()) {
                 for (batch in batches) {
                     if (failure != null) break
@@ -62,7 +86,12 @@ class SemanticJevAssist(
                     batchDetails += diagnostic
                     val batchStarted = System.nanoTime()
                     val response = try {
-                        client.judge(state, questions, 10000, 1) { diagnostic.request = it }
+                        if (selection != null) {
+                            val response = requireNotNull(reranker).rerank(selection,
+                                selection.parameters(rerankQuery, batch.map { it.text }, instruction, instructionField)) { diagnostic.httpRequest = it }
+                            require(response.scores.size == batch.size && response.scores.all { it.isFinite() }) { "重排评分不完整或非法" }
+                            batch.mapIndexed { index, item -> "r${item.position}" to response.scores[index] }.toMap()
+                        } else client.judge(state, questions, 10000, 1) { diagnostic.request = it }.mapValues { it.value.score }
                     } catch (cancel: CancellationException) {
                         diagnostic.status = "cancelled"
                         throw cancel
@@ -75,9 +104,9 @@ class SemanticJevAssist(
                     if (response.size != questions.size) failure = failure ?: "批量缺答或非法答案"
                     diagnostic.status = if (failure == null) "success" else "failure"
                     batch.forEach { item ->
-                        val score = response["r${item.position}"]?.score
+                        val score = response["r${item.position}"]
                         val maxScore = (item.question.criteria as JsonArray).lastIndex.toDouble()
-                        if (score != null && score.isFinite() && score in 0.0..maxScore) item.score = score
+                        if (score != null && score.isFinite() && (dedicated || score in 0.0..maxScore)) item.score = score
                     }
                 }
                 true
@@ -95,15 +124,16 @@ class SemanticJevAssist(
             val hits = if (failure == null)
                 (core + ordered).distinctBy { it.position }.take(normalized.topK).map { it.hit }
             else result.hits
-            finishRerank(event, model, items, ordered, hits, failure, normalized, batchDetails, started)
+            finishRerank(event, model, items, ordered, hits, failure, normalized, batchDetails, started,
+                backend = backend, instructionMode = config.rerankInstructionMode)
             return result.copy(hits = hits,
                 filters = result.filters + ("jev_rerank_pool" to pool.size),
                 durationNanos = result.durationNanos + System.nanoTime() - started,
-                degraded = result.degraded + listOfNotNull(failure?.let { "Jev 重排回退：$it" }))
+                degraded = result.degraded + listOfNotNull(failure?.let { "${if (dedicated) "专用" else "Jev"} 重排回退：$it" }))
         } catch (cancel: CancellationException) {
             withContext(NonCancellable) {
                 finishRerank(event, model, items, items, result.hits, "重排判断已取消", normalized,
-                    batchDetails, started, cancelled = true)
+                    batchDetails, started, cancelled = true, backend = backend, instructionMode = config.rerankInstructionMode)
             }
             throw cancel
         }
@@ -138,12 +168,14 @@ class SemanticJevAssist(
     private suspend fun finishRerank(event: SemanticDiagnosticEvent, model: String, items: List<RerankItem>,
         ordered: List<RerankItem>, hits: List<SemanticRecallHit>, failure: String?,
         settings: SemanticMemorySettings, batches: List<RerankBatchDiagnostic>, started: Long,
-        cancelled: Boolean = false) {
+        cancelled: Boolean = false, backend: String = "jev", instructionMode: String = "none") {
         val keptIds = hits.map { it.memory.id }.toSet()
         val finalRank = ordered.withIndex().associate { (index, item) -> item.hit.memory.id to index + 1 }
         val scores = items.mapNotNull { it.score }
         val details = buildJsonObject {
             put("mode", "rerank")
+            put("backend", backend)
+            if (backend == "http") put("instructionMode", instructionMode)
             put("model", model)
             put("candidates", items.size)
             put("batches", batches.size)
@@ -152,9 +184,9 @@ class SemanticJevAssist(
             put("unscored", items.size - scores.size)
             put("topK", settings.topK)
             put("selected", hits.size)
-            put("scoreMax", (items.first().question.criteria as JsonArray).lastIndex)
+            if (backend == "jev") put("scoreMax", (items.first().question.criteria as JsonArray).lastIndex)
             put("elapsedMillis", (System.nanoTime() - started) / 1_000_000.0)
-            put("scoreDistribution", scoreDistribution(scores))
+            put("scoreDistribution", scoreDistribution(scores, discrete = backend == "jev"))
             put("items", JsonArray(items.sortedBy { it.position }.map { item -> buildJsonObject {
                 put("id", item.hit.memory.id)
                 // 必须显式包成 JsonPrimitive：JsonObjectBuilder 的 map put 会返回旧值，elvis 会误判为 null。
@@ -178,6 +210,7 @@ class SemanticJevAssist(
 /** 只保存长度、计数、模型和用量，不保存候选、场景、响应正文或连接信息。 */
 private class RerankBatchDiagnostic(val questions: Int, val contentChars: Int) {
     var request: JevCallDiagnostics? = null
+    var httpRequest: RerankCallDiagnostics? = null
     var status: String = "running"
     var elapsedMillis: Double = 0.0
 
@@ -197,11 +230,24 @@ private class RerankBatchDiagnostic(val questions: Int, val contentChars: Int) {
                 usage.outputTokens?.let { count -> put("output_tokens", count) }
             }) }
         }
+        httpRequest?.let {
+            put("requestedModel", it.requestedModel)
+            it.responseModel?.let { model -> put("responseModel", model) }
+            put("requestBytes", it.requestBytes)
+            put("attempts", it.attempts)
+            it.usage?.let { usage -> put("usage", buildJsonObject {
+                usage.inputTokens?.let { count -> put("input_tokens", count) }
+                usage.outputTokens?.let { count -> put("output_tokens", count) }
+            }) }
+        }
     }
 }
 
-private fun safeError(error: Exception) = if (error is JevHttpException) "HTTP ${error.code}"
-    else "辅助请求或协议失败（${error.javaClass.simpleName}）"
+private fun safeError(error: Exception) = when (error) {
+    is JevHttpException -> "HTTP ${error.code}"
+    is RerankHttpException -> "HTTP ${error.code}"
+    else -> "辅助请求或协议失败（${error.javaClass.simpleName}）"
+}
 
 /**
  * 一条待重排候选：池内请求序号 [position]（r<ID> 与稳定排序用）、真实融合排名 [fusionRank]
@@ -214,10 +260,11 @@ private class RerankItem(val hit: SemanticRecallHit, val position: Int, val fusi
 }
 
 /** 按问题数上限与 64KB 请求体同时分批；单条超预算的候选不评分并计数。 */
-private fun planRerankBatches(state: JsonElement, items: List<RerankItem>): Pair<List<List<RerankItem>>, Int> {
+private fun planRerankBatches(state: JsonElement, items: List<RerankItem>,
+    measureRequest: ((List<RerankItem>) -> Int)? = null): Pair<List<List<RerankItem>>, Int> {
     val limit = JevClient.JEV_MAX_QUESTIONS.coerceAtMost(32)
-    fun measure(candidate: List<RerankItem>) =
-        estimateRequestBodyBytes(state, candidate.associate { "r${it.position}" to it.question })
+    fun measure(candidate: List<RerankItem>) = measureRequest?.invoke(candidate)
+        ?: estimateRequestBodyBytes(state, candidate.associate { "r${it.position}" to it.question })
     val batches = mutableListOf<List<RerankItem>>()
     var current = mutableListOf<RerankItem>()
     var skipped = 0
@@ -267,14 +314,14 @@ internal fun semanticRerankItemText(memory: SemanticMemoryEntity): String {
 }
 
 /** 分数分布只保留聚合值，避免诊断里出现整段正文。 */
-private fun scoreDistribution(scores: List<Double>): JsonObject {
+private fun scoreDistribution(scores: List<Double>, discrete: Boolean = true): JsonObject {
     if (scores.isEmpty()) return buildJsonObject { put("count", 0) }
     val sorted = scores.sorted()
     return buildJsonObject {
         put("count", sorted.size)
         put("min", sorted.first()); put("p50", sorted[(sorted.size - 1) / 2]); put("max", sorted.last())
         put("mean", sorted.average())
-        put("buckets", JsonArray((0 until 5).map { index -> JsonPrimitive(sorted.count { it.toInt().coerceIn(0, 4) == index }) }))
+        if (discrete) put("buckets", JsonArray((0 until 5).map { index -> JsonPrimitive(sorted.count { it.toInt().coerceIn(0, 4) == index }) }))
     }
 }
 
