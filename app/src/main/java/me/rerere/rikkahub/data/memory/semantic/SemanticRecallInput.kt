@@ -5,17 +5,20 @@ import me.rerere.ai.ui.StreamCompletion
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.limitContext
 
-/** 本轮召回的固定输入；当前消息单独交给重排，背景只用于消解承接语与场景。 */
+/** 本轮召回的固定输入；当前消息主导检索，上一回复辅助召回，最近整轮供重排消解场景。 */
 internal data class SemanticRecallInput(
     val currentUserMessage: String,
     val retrievalQuery: String,
     val recentContext: String,
+    val previousAssistantMessage: String? = null,
 ) {
-    fun cacheKey(revision: String, jevRevision: String): String =
-        semanticContentHash(listOf(revision, jevRevision, currentUserMessage, retrievalQuery, recentContext)
+    fun cacheKey(revision: String, jevRevision: String, useAssistantContext: Boolean = true): String {
+        val queries = semanticRecallQueries(retrievalQuery, previousAssistantMessage, useAssistantContext)
+        return semanticContentHash(listOf(revision, jevRevision, currentUserMessage, retrievalQuery, recentContext,
+            useAssistantContext.toString(), queries.assistantStrategy, *queries.vectorInputs.toTypedArray())
             .joinToString("") { "${it.length}:$it" })
+    }
 }
-
 /**
  * 只读本次请求已选中的可见历史，不从原始节点补回被裁剪的原文。
  * 在工具循环前调用一次，工具结果和本轮助手草稿不改变召回查询。
@@ -49,25 +52,19 @@ internal fun buildSemanticRecallInput(messages: List<UIMessage>, contextMessageL
     val context = semanticTurnText(turn, 1200)
     val query = if (hasAssistantTail && turn.isNotEmpty()) {
         current + "\n" + semanticTurnText(turn.filter { it.role == MessageRole.ASSISTANT }, 1200)
-    } else if (isSemanticContinuation(current) && turn.isNotEmpty()) {
-        // 只扩展明确承接语；具体短指令及长输入保持全文，不用长度猜测用户是否换了话题。
-        current + "\n" + context
     } else current
-    return SemanticRecallInput(current, query, context)
+    val replies = history.drop(previousUserIndex + 1).filter { it.role == MessageRole.ASSISTANT }
+    // 最近轮不完整就不用上文；不跳回更早的完整回复，也不重复加入助手尾续写。
+    val previousAssistant = if (!hasAssistantTail && replies.isNotEmpty() && replies.all(::isSemanticSceneComplete)) {
+        replies.last().toText().takeIf { it.isNotBlank() }
+    } else null
+    return SemanticRecallInput(current, query, context, previousAssistant)
 }
 
 private fun isSemanticSceneComplete(message: UIMessage): Boolean =
     message.getTools().all { it.isExecuted } &&
         (message.generationCompletion == null ||
             (message.generationCompletion == StreamCompletion.NORMAL && message.finishedAt != null))
-
-private val SEMANTIC_CONTINUATIONS = setOf(
-    "嗯", "嗯嗯", "好", "好的", "继续", "接着", "然后呢", "后来呢", "还记得吗", "你还记得吗",
-    "这件事呢", "那件事呢", "yes", "ok", "okay", "continue", "go on", "what happened next", "do you remember",
-)
-
-private fun isSemanticContinuation(text: String): Boolean =
-    text.trim().trimEnd('。', '！', '？', '.', '!', '?', '…').trim().lowercase() in SEMANTIC_CONTINUATIONS
 
 /** 整轮放得下时不截断；超长背景给每个角色保留首尾，剩余空间优先留给最新回复。 */
 private fun semanticTurnText(turn: List<UIMessage>, maxChars: Int): String {
@@ -89,15 +86,4 @@ private fun semanticTurnText(turn: List<UIMessage>, maxChars: Int): String {
         remaining -= extra
     }
     return texts.indices.joinToString("\n") { labels[it] + semanticContextExcerpt(texts[it], budgets[it]) }
-}
-
-private fun semanticContextExcerpt(text: String, maxChars: Int): String {
-    if (text.length <= maxChars) return text
-    val omission = "\n…（中间省略）…\n"
-    if (maxChars <= omission.length) return ""
-    val headSize = (maxChars - omission.length) / 2
-    val tailSize = maxChars - omission.length - headSize
-    val headEnd = if (headSize > 0 && text[headSize - 1].isHighSurrogate()) headSize - 1 else headSize
-    val tailStart = (text.length - tailSize).let { if (text[it].isLowSurrogate()) it + 1 else it }
-    return text.substring(0, headEnd) + omission + text.substring(tailStart)
 }

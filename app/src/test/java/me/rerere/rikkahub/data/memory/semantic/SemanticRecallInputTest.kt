@@ -6,6 +6,7 @@ import me.rerere.ai.ui.UIMessagePart
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,14 +16,15 @@ class SemanticRecallInputTest {
     }
 
     @Test
-    fun shortFollowUpUsesTheLatestCompleteRound() {
+    fun shortFollowUpKeepsCurrentQueryAndFreezesTheLatestCompleteRound() {
         val input = buildSemanticRecallInput(listOf(
             UIMessage.user("OLD_USER"), completed("OLD_SCENE".repeat(1000)),
             UIMessage.user("我们已经来到码头了吗？"), completed("LATEST_SCENE 她在码头等那艘渡船。"),
             UIMessage.user("嗯。"),
         ), 0)
         assertEquals("嗯。", input.currentUserMessage)
-        assertTrue(input.retrievalQuery.contains("码头"))
+        assertEquals("嗯。", input.retrievalQuery)
+        assertEquals("LATEST_SCENE 她在码头等那艘渡船。", input.previousAssistantMessage)
         assertTrue(input.recentContext.contains("LATEST_SCENE"))
         assertTrue(input.recentContext.contains("我们已经来到码头了吗"))
         assertFalse(input.recentContext.contains("OLD_SCENE"))
@@ -51,6 +53,7 @@ class SemanticRecallInputTest {
         ), 1)
         assertEquals("继续", limited.retrievalQuery)
         assertEquals("", limited.recentContext)
+        assertNull(limited.previousAssistantMessage)
     }
 
     @Test
@@ -89,7 +92,7 @@ class SemanticRecallInputTest {
         assertTrue(input.recentContext.contains("LATEST_SCENE"))
         assertTrue(input.recentContext.length <= 1300)
         assertTrue(input.retrievalQuery.length <= 1300)
-        assertTrue(input.retrievalQuery.contains("LATEST_SCENE"))
+        assertEquals("你还记得吗？", input.retrievalQuery)
         assertTrue(input.retrievalQuery.contains("你还记得吗？"))
         val rerankContext = semanticRerankContext(input.currentUserMessage, input.recentContext)
         assertTrue(rerankContext.contains("USER_START"))
@@ -107,6 +110,7 @@ class SemanticRecallInputTest {
         ), 0)
         assertEquals("", input.recentContext)
         assertEquals("继续", input.retrievalQuery)
+        assertNull(input.previousAssistantMessage)
     }
 
     @Test
@@ -117,6 +121,7 @@ class SemanticRecallInputTest {
         assertEquals(key, input.cacheKey("memory-v1", "jev-v1"))
         assertNotEquals(key, input.cacheKey("memory-v2", "jev-v1"))
         assertNotEquals(key, input.cacheKey("memory-v1", "jev-v2"))
+        assertNotEquals(key, input.cacheKey("memory-v1", "jev-v1", useAssistantContext = false))
         val anotherScene = buildSemanticRecallInput(
             listOf(history[0], completed("去灯塔。"), history[2]), 0)
         assertNotEquals(key, anotherScene.cacheKey("memory-v1", "jev-v1"))
@@ -137,6 +142,7 @@ class SemanticRecallInputTest {
         assertTrue(input.recentContext.contains("PREFILL_END"))
         assertTrue(input.retrievalQuery.contains("渡口"))
         assertFalse(input.recentContext.contains("花园的旧场景"))
+        assertNull(input.previousAssistantMessage)
     }
 
     @Test
@@ -205,6 +211,30 @@ class SemanticRecallInputTest {
             assertEquals("", input.currentUserMessage)
             assertEquals("", input.retrievalQuery)
             assertEquals("", input.recentContext)
+            assertNull(input.previousAssistantMessage)
+        }
+    }
+
+    @Test
+    fun onlyTheLastReplyInTheLatestCompleteVisibleTurnIsFrozen() {
+        val input = buildSemanticRecallInput(listOf(
+            UIMessage.user("更早轮次"), completed("OLD_REPLY"),
+            UIMessage.user("上一轮问题"), completed("FIRST_REPLY"), completed("LAST_REPLY"),
+            UIMessage.system("SYSTEM_CONTENT"),
+            UIMessage.user("当前问题"),
+        ), 0)
+        assertEquals("LAST_REPLY", input.previousAssistantMessage)
+        val pending = completed("PENDING").let {
+            it.copy(parts = it.parts + UIMessagePart.Tool(toolCallId = "pending", toolName = "tool", input = "{}"))
+        }
+        for (latest in listOf(pending, completed("TRUNCATED").copy(generationCompletion = StreamCompletion.TRUNCATED))) {
+            val unavailable = buildSemanticRecallInput(listOf(
+                UIMessage.user("旧轮次"), completed("OLD_REPLY"),
+                UIMessage.user("最新轮次"), completed("EARLIER_SEGMENT"), latest,
+                UIMessage.user("然后呢"),
+            ), 0)
+            assertNull(unavailable.previousAssistantMessage)
+            assertEquals("然后呢", unavailable.retrievalQuery)
         }
     }
 }

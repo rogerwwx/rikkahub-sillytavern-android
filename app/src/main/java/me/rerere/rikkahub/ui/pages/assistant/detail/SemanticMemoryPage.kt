@@ -856,6 +856,13 @@ private fun SemanticSettingsPanel(
             }
         }
         SemanticMemorySection("召回设置", HugeIcons.Search01) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("使用上一条助手回复辅助召回", Modifier.weight(1f))
+                Switch(checked = config.useAssistantContext,
+                    onCheckedChange = { enabled -> configure { it.copy(useAssistantContext = enabled) } })
+            }
+            Text("默认开启；有完整上文且未明确换题时，额外生成一个 Embedding 查询向量，会增加用量。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             SemanticIntSlider("最多召回条数 · TopK", config.topK, 1..50) { value ->
                 configure { it.copy(topK = value, coreBudget = it.coreBudget.coerceAtMost(value)) }
             }
@@ -963,7 +970,7 @@ private fun SemanticSettingsPanel(
             NumberSetting("单路退化排名参数（1—1000）", config.rrfK.toString()) { raw ->
                 raw.toIntOrNull()?.takeIf { it in 1..1000 }?.let { value -> configure { it.copy(rrfK = value) } }
             }
-            Text("默认按分数融合：关键词与向量各自归一化后加权，名次接近的两路命中另有共识加成；综合分再按相关性 2 : 重要度 1 加权。不按真实时间做新鲜度衰减——剧情内时间可与现实脱钩。只有单路失败退化时，才用该参数做 1/(k+名次+1) 的排名衰减。",
+            Text("默认按分数融合：关键词与向量各自归一化后按 0.2 : 0.8 加权，不追加共识加成；综合分再按相关性 2 : 重要度 1 加权。不按真实时间做新鲜度衰减——剧情内时间可与现实脱钩。只有单路失败退化时，才用该参数做 1/(k+名次+1) 的排名衰减。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         CardGroup(modifier = Modifier.fillMaxWidth(), title = { Text("数据管理") }) {
@@ -1086,6 +1093,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
     val jobs by vm.jobs.collectAsStateWithLifecycle()
     val imports by vm.imports.collectAsStateWithLifecycle()
     val recallQuery by vm.recallQuery.collectAsStateWithLifecycle()
+    val recallPreviousAssistant by vm.recallPreviousAssistant.collectAsStateWithLifecycle()
     val recallResult by vm.recallResult.collectAsStateWithLifecycle()
     var whole by rememberSaveable { mutableStateOf(false) }
     val events = if (whole) allEvents else assistantEvents
@@ -1114,7 +1122,17 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                             onValueChange = { vm.recallQuery.value = it },
                             placeholder = { Text("输入一句话测试真实召回") },
                             leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
-                            singleLine = true,
+                            minLines = 2,
+                            maxLines = 5,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = recallPreviousAssistant,
+                            onValueChange = { vm.recallPreviousAssistant.value = it },
+                            label = { Text("上一条助手回复（可选）") },
+                            supportingText = { Text("仅用所填上文，不模拟更早的用户背景。") },
+                            minLines = 3, maxLines = 8,
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier.fillMaxWidth(),
                         )
@@ -1135,16 +1153,45 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                                 result.filters["jev_rerank_pool"]?.let { " · 重排 " + it + " 条" }.orEmpty(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("助手辅助：" + (if (result.assistantWeight > 0.0) "已参与" else "未参与") +
+                                " · 词法 " + result.assistantLexicalCandidates + " · 向量 " +
+                                result.assistantVectorCandidates + " · 参与权重 " + "%.1f".format(result.assistantWeight),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            result.queries?.let { snapshot ->
+                                var expanded by remember(result.eventId) { mutableStateOf(false) }
+                                TextButton(onClick = { expanded = !expanded }) {
+                                    Text(if (expanded) "收起本次查询" else "查看本次实际查询")
+                                }
+                                if (expanded) {
+                                    Text("主查询\n" + snapshot.mainQuery, style = MaterialTheme.typography.bodySmall)
+                                    snapshot.vectorInputs.forEachIndexed { index, input ->
+                                        Text("向量查询 ${index + 1}\n$input", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    Text("辅助策略：" + when (snapshot.assistantStrategy) {
+                                        "disabled" -> "已关闭"
+                                        "no_context" -> "没有上文"
+                                        "topic_switch" -> "当前消息明确换题"
+                                        "empty_query" -> "当前消息为空"
+                                        "continuation" -> "纯承接语，以助手辅助结果为准"
+                                        else -> "上一条助手回复"
+                                    }, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
                             result.degraded.forEach {
                                 Text(it, style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.error)
                             }
-                            result.hits.take(5).forEach { hit ->
+                            result.hits.forEachIndexed { index, hit ->
+                                var expanded by remember(result.eventId, hit.memory.id) { mutableStateOf(false) }
                                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(hit.memory.content, style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Text("${index + 1}. " + hit.memory.content, style = MaterialTheme.typography.bodySmall,
+                                        maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
                                     Text(semanticRecallScoreLine(hit), style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.outline)
+                                    TextButton(onClick = { expanded = !expanded }) {
+                                        Text(if (expanded) "收起正文" else "展开正文")
+                                    }
                                 }
                             }
                         }

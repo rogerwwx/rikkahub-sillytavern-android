@@ -10,6 +10,7 @@ import me.rerere.rikkahub.data.ai.jev.*
 import me.rerere.ai.provider.RerankCallDiagnostics
 import me.rerere.ai.provider.providers.openai.RerankHttpException
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class SemanticJevAssist(
     private val client: JevClient,
@@ -37,11 +38,11 @@ class SemanticJevAssist(
         val config = settings.dream.normalized()
         if (!config.jevEnabled || !config.jevRecall) return result
         val normalized = settings.normalized()
-        // 候选池按 N 保住两路各自的头部，再按融合序补足；核心记忆即使落在 N 之后也补进池，
+        // 候选池在 N 内按查询权重保住主/辅助各自的路线头部，再按融合序补足；核心落在 N 之后也补进池，
         // 否则"相关核心优先名额"会因为重排而静默失效（上限 N + coreBudget）。
         val ranked = result.candidates.ifEmpty { result.hits }
         val fusionRankById = ranked.withIndex().associate { (index, hit) -> hit.memory.id to index + 1 }
-        val head = selectRerankPool(ranked, config.jevCandidateCount)
+        val head = selectRerankPool(ranked, config.jevCandidateCount, result.assistantWeight)
         val coreOutside = result.hits.filter { it.memory.isCore && head.none { h -> h.memory.id == it.memory.id } }
             .take(normalized.coreBudget)
         val pool = (head + coreOutside).distinctBy { it.memory.id }
@@ -138,21 +139,39 @@ class SemanticJevAssist(
         }
     }
 
-    /**
-     * N 池：向量 ceil(N/2)、词法 floor(N/2) 各自取路内头部，去重后按融合序补足到 N，
-     * 最后仍按融合序稳定呈现。N=1 沿用融合首条；某路缺候选时空出的名额由另一路/融合序补。
-     */
-    internal fun selectRerankPool(ranked: List<SemanticRecallHit>, count: Int): List<SemanticRecallHit> {
-        val n = count.coerceIn(1, 100)
-        if (n == 1) return ranked.take(1)
-        val vectorHead = ranked.filter { it.rank.vectorRank != null }
-            .sortedBy { it.rank.vectorRank }.take((n + 1) / 2)
-        val lexicalHead = ranked.filter { it.rank.lexicalRank != null }
-            .sortedBy { it.rank.lexicalRank }.take(n / 2)
-        val ids = (vectorHead + lexicalHead + ranked).distinctBy { it.memory.id }
-            .take(n).map { it.memory.id }.toSet()
-        // 先保留两路头部并补足 ID，再按原融合序输出；同分重排不能无故后移补齐项。
-        return ranked.filter { it.memory.id in ids }.distinctBy { it.memory.id }
+    companion object {
+        /**
+         * N 按查询权重四舍五入分配，混合查询各至少一槽；各查询再按向量 ceil/词法 floor 取头部。
+         * 去重后按最终融合序补齐并输出；无辅助沿用原两路口径，纯承接只取辅助，N=1 沿用融合首条。
+         */
+        internal fun selectRerankPool(ranked: List<SemanticRecallHit>, count: Int,
+            assistantWeight: Double = 0.0): List<SemanticRecallHit> {
+            val n = count.coerceIn(1, 100)
+            if (n == 1) return ranked.take(1)
+            val weight = assistantWeight.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 0.0
+            val assistantSlots = when (weight) {
+                0.0 -> 0
+                1.0 -> n
+                else -> (n * weight).roundToInt().coerceIn(1, n - 1)
+            }
+            fun routeHeads(slots: Int, assistant: Boolean): List<SemanticRecallHit> {
+                if (slots == 0) return emptyList()
+                fun vectorRank(hit: SemanticRecallHit) =
+                    if (assistant) hit.rank.assistantEvidence?.vectorRank else hit.rank.vectorRank
+                fun lexicalRank(hit: SemanticRecallHit) =
+                    if (assistant) hit.rank.assistantEvidence?.lexicalRank else hit.rank.lexicalRank
+                val vector = ranked.filter { vectorRank(it) != null }
+                    .sortedBy { vectorRank(it) }.take((slots + 1) / 2)
+                val lexical = ranked.filter { lexicalRank(it) != null }
+                    .sortedBy { lexicalRank(it) }.take(slots / 2)
+                return vector + lexical
+            }
+            val eligible = if (weight == 1.0) ranked.filter { it.rank.assistantEvidence != null } else ranked
+            val heads = routeHeads(n - assistantSlots, assistant = false) +
+                routeHeads(assistantSlots, assistant = true)
+            val ids = (heads + eligible).distinctBy { it.memory.id }.take(n).map { it.memory.id }.toSet()
+            return eligible.filter { it.memory.id in ids }.distinctBy { it.memory.id }
+        }
     }
 
     private suspend fun start(assistantId: String, conversationId: String, purpose: String): SemanticDiagnosticEvent {

@@ -14,6 +14,7 @@ data class SemanticMemorySettings(
     val rrfK: Int = 60,
     val coreBudget: Int = 2,
     val dream: SemanticDreamSettings = SemanticDreamSettings(),
+    val useAssistantContext: Boolean = true,
 ) {
     fun normalized() = copy(
         dimensions = dimensions?.coerceIn(1, 65536),

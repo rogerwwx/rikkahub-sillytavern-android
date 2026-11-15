@@ -367,6 +367,7 @@ class GenerationLoop(
     suspend fun currentSemanticRevision(config: SemanticMemorySettings): String = semanticInput.cacheKey(
         semanticMemoryRepo.recallRevision(assistant.id.toString(), requireNotNull(conversationId).toString(), config),
         if (config.dream.jevEnabled && config.dream.jevRecall) semanticJevAssist.configurationRevision(config.dream) else "",
+        config.useAssistantContext,
     )
     for (stepIndex in 0 until maxSteps) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
@@ -398,7 +399,9 @@ class GenerationLoop(
                     if (revision != semanticRevision) {
                         semanticRecall = if (semanticInput.retrievalQuery.isBlank()) null else {
                             // 重排作用在未按 token 预算裁剪的候选池上；预算只决定最终注入多少。
-                            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(), semanticInput.retrievalQuery, semanticConfig)
+                            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(),
+                                semanticInput.retrievalQuery, semanticConfig,
+                                previousAssistantMessage = semanticInput.previousAssistantMessage)
                             val reranked = semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(), semanticInput.currentUserMessage,
                                 semanticInput.recentContext,
                                 semanticConfig, recalled)

@@ -63,7 +63,56 @@ data class SemanticRankHit(
     val lexicalRawScore: Double? = null,
     val lexicalRank: Int? = null,
     val vectorRank: Int? = null,
+    /** 晚融合前的主查询综合分；辅助独有候选为 null，贡献按零计算。 */
+    val mainQueryScore: Double? = null,
+    val assistantEvidence: SemanticQueryEvidence? = null,
 )
+
+/** 辅助查询独立完成词法、向量与重要度融合后的证据。 */
+data class SemanticQueryEvidence(
+    val score: Double,
+    val lexicalScore: Double?,
+    val lexicalRawScore: Double?,
+    val lexicalRank: Int?,
+    val vectorScore: Double?,
+    val vectorRank: Int?,
+    val vectorRanked: Boolean,
+)
+
+data class SemanticContextFusion(val hits: List<SemanticRankHit>, val assistantWeight: Double)
+
+/** 两个已加权的查询晚融合；缺路为零，不再归一化或重复叠加重要度。 */
+fun fuseSemanticContext(
+    main: List<SemanticRankHit>,
+    assistant: List<SemanticRankHit>,
+    technicalError: Boolean = false,
+    preferAssistant: Boolean = false,
+): SemanticContextFusion {
+    if (technicalError || assistant.isEmpty()) return SemanticContextFusion(main, 0.0)
+    val first = main.firstOrNull()
+    val weight = when {
+        preferAssistant -> 1.0
+        first?.lexicalRank == 1 && first.vectorRank == 1 -> 0.2
+        else -> 0.4
+    }
+    val primary = main.associateBy { it.id }
+    val auxiliary = assistant.associateBy { it.id }
+    // 纯承接语只取辅助候选，防止主查询独有的零贡献条目混进 MMR/core 或重排池。
+    val ids = if (preferAssistant) auxiliary.keys else primary.keys + auxiliary.keys
+    val hits = ids.map { id ->
+        val p = primary[id]
+        val c = auxiliary[id]
+        (p ?: SemanticRankHit(id, null, null, 0.0, vectorRanked = false)).copy(
+            score = (1.0 - weight) * (p?.score ?: 0.0) + weight * (c?.score ?: 0.0),
+            mainQueryScore = p?.score,
+            assistantEvidence = c?.let {
+                SemanticQueryEvidence(it.score, it.lexicalScore, it.lexicalRawScore, it.lexicalRank,
+                    it.vectorScore, it.vectorRank, it.vectorRanked)
+            },
+        )
+    }.sortedWith(compareByDescending<SemanticRankHit> { it.score }.thenBy { it.id })
+    return SemanticContextFusion(hits, weight)
+}
 
 enum class SemanticFusionMode { SCORE, RRF }
 

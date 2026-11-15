@@ -7,6 +7,44 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SemanticJevRerankTest {
+    private fun poolHit(id: String, vectorRank: Int? = null, lexicalRank: Int? = null,
+        assistant: Boolean = false): SemanticRecallHit {
+        val evidence = SemanticQueryEvidence(0.9, lexicalRank?.let { 1.0 }, lexicalRank?.let { -1.0 },
+            lexicalRank, vectorRank?.let { 0.9 }, vectorRank, vectorRank != null)
+        return SemanticRecallHit(SemanticMemoryEntity(id = id, assistantId = "a", conversationId = "c", content = id),
+            SemanticRankHit(id, if (assistant) null else evidence.lexicalScore,
+                if (assistant) null else evidence.vectorScore, 0.9,
+                vectorRanked = !assistant && vectorRank != null,
+                vectorRank = vectorRank.takeUnless { assistant }, lexicalRank = lexicalRank.takeUnless { assistant },
+                assistantEvidence = evidence.takeIf { assistant }))
+    }
+
+    @Test fun weightedPoolProtectsAuxiliaryHeadsWhenDisjointPrimaryHeadsFillN() {
+        val ranked = listOf(poolHit("auxVector", vectorRank = 1, assistant = true),
+            poolHit("auxLexical", lexicalRank = 1, assistant = true),
+            poolHit("v1", vectorRank = 1), poolHit("v2", vectorRank = 2),
+            poolHit("l1", lexicalRank = 1), poolHit("l2", lexicalRank = 2))
+        val pool = SemanticJevAssist.selectRerankPool(ranked, 4, assistantWeight = 0.4)
+        assertEquals(listOf("auxVector", "auxLexical", "v1", "l1"), pool.map { it.memory.id })
+        assertEquals(4, pool.size)
+        assertEquals(ranked.take(1), SemanticJevAssist.selectRerankPool(ranked, 1, assistantWeight = 0.4))
+    }
+
+    @Test fun noAuxiliaryPoolRetainsTheOriginalDisjointRouteHeadsAndFusionOrder() {
+        val ranked = listOf(poolHit("fused"), poolHit("v2", vectorRank = 2),
+            poolHit("l2", lexicalRank = 2), poolHit("v1", vectorRank = 1), poolHit("l1", lexicalRank = 1))
+        assertEquals(listOf("v2", "l2", "v1", "l1"),
+            SemanticJevAssist.selectRerankPool(ranked, 4).map { it.memory.id })
+    }
+
+    @Test fun pureContinuationPoolUsesOnlyAuxiliaryRouteEvidence() {
+        val ranked = listOf(poolHit("main", vectorRank = 1, lexicalRank = 1),
+            poolHit("auxVector", vectorRank = 1, assistant = true),
+            poolHit("auxLexical", lexicalRank = 1, assistant = true))
+        assertEquals(listOf("auxVector", "auxLexical"),
+            SemanticJevAssist.selectRerankPool(ranked, 4, assistantWeight = 1.0).map { it.memory.id })
+    }
+
     @Test fun recentSceneAndUppercaseRolesSurviveLongHistory() {
         val context = semanticRerankContext("继续",
             "USER: OLD_SCENE " + "旧".repeat(1800) + "\nASSISTANT: 最新的约定\nUSER: LATEST_SCENE")

@@ -68,7 +68,22 @@ fun semanticRecallScoreLine(hit: SemanticRecallHit): String {
     val vector = (hit.rank.vectorScore?.let { "余弦 " + "%.3f".format(it) } ?: "余弦 无") +
         (hit.rank.vectorRank?.let { "（向量第 " + it + "）" } ?: "")
     // 综合分 = 融合分 + 重要度加权（2:1）；不按现实时间做新鲜度衰减。
+    hit.rank.assistantEvidence?.let { auxiliary ->
+        return "当前：" + listOfNotNull(lexical, raw, vector,
+            "综合 " + (hit.rank.mainQueryScore?.let { "%.4f".format(it) } ?: "无")).joinToString(" · ") +
+            "\n辅助：BM25 " + (auxiliary.lexicalScore?.let { "%.3f".format(it) } ?: "无") +
+            (auxiliary.lexicalRank?.let { "（词法第 $it）" } ?: "") +
+            (auxiliary.lexicalRawScore?.let { " · raw " + formatRawBm25(it) } ?: "") +
+            " · 余弦 " + (auxiliary.vectorScore?.let { "%.3f".format(it) } ?: "无") +
+            (auxiliary.vectorRank?.let { "（向量第 $it）" } ?: "") +
+            " · 综合 " + "%.4f".format(auxiliary.score) +
+            "\n晚融合 " + "%.4f".format(hit.rank.score)
+    }
     val note = if (hit.rank.vectorRanked) "" else " · 仅关键词入榜"
+    if (hit.rank.mainQueryScore != null) {
+        return listOfNotNull(lexical, raw, vector, "当前综合 " + "%.4f".format(hit.rank.mainQueryScore),
+            "晚融合 " + "%.4f".format(hit.rank.score)).joinToString(" · ") + note
+    }
     return listOfNotNull(lexical, raw, vector, "综合 " + "%.4f".format(hit.rank.score)).joinToString(" · ") + note
 }
 
@@ -92,8 +107,15 @@ fun semanticRecallScoreLines(event: SemanticDiagnosticEvent): List<String> = run
         val rawScore = text("lexicalRawScore")?.let { "raw $it" }
         val vectorRank = hit["vectorRank"]?.jsonPrimitive?.intOrNull
         val vector = (text("vectorScore") ?: "无") + (vectorRank?.let { "（向量第 $it）" } ?: "")
+        val auxiliary = hit["assistantEvidence"] as? JsonObject
+        val contextScores = if (auxiliary != null) {
+            "；当前综合 ${text("mainQueryScore") ?: "无"}；辅助综合 " +
+                (auxiliary["score"]?.jsonPrimitive?.contentOrNull ?: "无") +
+                "；辅助词法 " + (auxiliary["lexicalScore"]?.jsonPrimitive?.contentOrNull ?: "无") +
+                "；辅助余弦 " + (auxiliary["vectorScore"]?.jsonPrimitive?.contentOrNull ?: "无")
+        } else ""
         "${text("id")} / v${text("version")} / ${text("type")}：" +
             listOfNotNull(lexical, rawScore, "余弦 $vector", "综合 ${text("score")}").joinToString("；") +
-            "；向量参与 ${if (vectorRanked) "是" else "否"}"
+            "；当前向量参与 ${if (vectorRanked) "是" else "否"}" + contextScores
     } ?: emptyList()
 }.getOrDefault(emptyList())
