@@ -48,7 +48,8 @@ object SemanticVectors {
 /**
  * 融合前的单条候选；score 为当前阶段的分数（融合分数或加权后的最终分数）。
  *
- * [lexicalScore]/[vectorScore] 是**参与融合的口径**（词法为本次归一化值、向量为入榜余弦）；
+ * [lexicalScore] 为本次归一化词法值；[vectorScore] 为完整原文与可选叙述视图的最佳余弦。
+ * Repository 也可为词法候选回填未入榜的最佳余弦，是否进入向量路线仍以 [vectorRanked] 为准；
  * [lexicalRawScore] 是 FTS5 原始 bm25（越小越相关，负数属正常）；
  * [lexicalRank]/[vectorRank] 是各自路线**实际参与融合**的 1-based 名次，
  * 只在候选确实位于该路线内（已过阈值/去重）时非空，绝不从回填的余弦反推。
@@ -68,16 +69,17 @@ enum class SemanticFusionMode { SCORE, RRF }
 
 /**
  * 检索口径常量，出处 LivingMemory 2.9.1 core/retrieval/。
- * 除加权项外与 LM 默认值一致；加权按本应用的 RP 场景去掉时间新鲜度（见 RELEVANCE_WEIGHT 注释）。
+ * RP 召回由向量承担主要排序，降低词法权重并关闭默认共识加成；
+ * 加权按本应用的 RP 场景去掉时间新鲜度（见 RELEVANCE_WEIGHT 注释）。
  * 这里保留常量而非设置项：本轮不新增界面开关，改口径只需要改这一处。
  */
 object SemanticRankingDefaults {
     /** hybrid_retriever.py:104 —— 默认 score 分数融合，rrf 只是可选模式。 */
     val FUSION_MODE = SemanticFusionMode.SCORE
-    /** hybrid_retriever.py:105-107 —— 分数融合里 BM25 一路的权重。 */
-    const val BM25_WEIGHT = 0.5
-    /** hybrid_retriever.py:113-115 —— 两路都召回且名次接近的共识加成上限。 */
-    const val AGREEMENT_BONUS = 0.25
+    /** 改自 hybrid_retriever.py:105-107；RP 局部回放采用 0.2，保留词法候选与回退。 */
+    const val BM25_WEIGHT = 0.2
+    /** 改自 hybrid_retriever.py:113-115；默认不奖励弱双路共识，显式参数仍可测试原策略。 */
+    const val AGREEMENT_BONUS = 0.0
     /**
      * 相关性／重要度权重。LivingMemory hybrid_retriever.py:96-98 是 0.5/0.25/0.25，
      * 第三项是"按真实时钟算的时间新鲜度"。本应用用于角色扮演：剧情内时间可以过一个月，

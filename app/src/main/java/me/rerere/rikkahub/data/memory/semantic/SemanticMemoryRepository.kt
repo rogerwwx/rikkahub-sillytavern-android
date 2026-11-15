@@ -262,6 +262,7 @@ class SemanticMemoryRepository(
             try {
                 val config = settings.normalized()
                 val retrievalQuery = query.trim()
+                val vectorQuery = semanticVectorQuery(retrievalQuery)
                 val now = System.currentTimeMillis()
                 val all = list(assistantId, conversationId)
                 val active = all.filter { it.status == "active" && (it.isCore || it.expiresAt == null || it.expiresAt > now) }
@@ -275,7 +276,7 @@ class SemanticMemoryRepository(
                 // 启用 Jev 时每路容量至少覆盖 N，保证重排池能拿到两路头部；关闭时保持原容量，不加请求。
                 val jevPool = config.dream.jevCandidateCount.takeIf { config.dream.jevEnabled && config.dream.jevRecall }
                 val limit = maxOf(config.topK * config.candidateMultiplier, jevPool ?: 0)
-                // 词法只检索"当前话题"：向量仍用完整 query，这里派生聚焦文本再由原生切词收敛成内容词 OR。
+                // 词法只检索"当前话题"：向量始终包含完整 query，这里由原生切词收敛成内容词 OR。
                 // 不再把全文所有跨词二元组同权并入主查询——那会把语气/动作词混进 BM25 主信号。
                 val lexicalFocus = semanticLexicalFocus(retrievalQuery)
                 val nativeTokens = if (lexicalFocus.isBlank()) "" else semanticNativeTokens(lexicalFocus)
@@ -302,10 +303,10 @@ class SemanticMemoryRepository(
                 }
                 val vector = try {
                     val base = fingerprint(config)
-                    val (queryFingerprint, queryVectors) = request(assistantId, listOf(retrievalQuery), config, "query",
+                    val (queryFingerprint, queryVectors) = request(assistantId, vectorQuery.inputs, config, "query",
                         conversationId = conversationId)
-                    val queryVector = queryVectors.single()
-                    check(queryFingerprint == "$base:${queryVector.size}" && fingerprint(config) == base) {
+                    val queryDimension = queryVectors.first().size
+                    check(queryFingerprint == "$base:$queryDimension" && fingerprint(config) == base) {
                         "Embedding 查询配置在请求期间变化"
                     }
                     val live = assistantSettings(assistantId)
@@ -318,7 +319,7 @@ class SemanticMemoryRepository(
                             memory.embeddingFingerprint != "$base:${memory.embeddingDimension}" -> "old_model"
                             memory.embeddedVersion != memory.contentVersion -> "stale_content_version"
                             memory.contentHash != semanticContentHash(memory.content) -> "content_hash_changed"
-                            memory.embeddingDimension != queryVector.size -> "dimension_mismatch"
+                            memory.embeddingDimension != queryDimension -> "dimension_mismatch"
                             SemanticVectors.decode(memory.embedding, memory.embeddingDimension) == null -> "invalid_vector_values"
                             else -> null
                         }
@@ -326,7 +327,11 @@ class SemanticMemoryRepository(
                         reason == null
                     }
                     filters["invalid_vector"] = active.size - valid.size
-                    valid.map { it.id to SemanticVectors.cosine(queryVector, SemanticVectors.decode(it.embedding, it.embeddingDimension)!!) }
+                    // 多视图合成同一向量路线：每条记忆取最佳余弦，后续阈值与容量保持原口径。
+                    valid.map { memory ->
+                        val memoryVector = SemanticVectors.decode(memory.embedding, memory.embeddingDimension)!!
+                        memory.id to queryVectors.maxOf { SemanticVectors.cosine(it, memoryVector) }
+                    }
                         .also { scores ->
                             rawVectorScores.putAll(scores)
                             filters["below_similarity"] = scores.count { it.second < config.minSimilarity }
@@ -341,7 +346,7 @@ class SemanticMemoryRepository(
                     filters["invalid_vector"] = active.size
                     emptyList()
                 }
-                // 融合走 LivingMemory 默认的 score 分数融合，随后只做重要度加权；
+                // 融合走适配 RP 权重的 score 分数融合，随后只做重要度加权；
                 // 角色扮演里剧情时间与真实时钟脱钩，故不按写入/访问时间做新鲜度衰减。
                 // 单路失败时按排名占位，避免与失败路线比较名次。
                 val importance = active.associate { it.id to it.importance }
@@ -375,6 +380,9 @@ class SemanticMemoryRepository(
                 val fusionRankById = candidates.withIndex().associate { (index, hit) -> hit.memory.id to index + 1 }
                 dao.putEvent(event.copy(status = status, durationNanos = duration, detailJson = buildJsonObject {
                     put("lexicalCandidates", lexical.size); put("vectorCandidates", vector.size)
+                    // 向量视图只记数量/策略，vectorScore 为各视图最佳余弦，不保存查询或正文。
+                    put("vectorQueryCount", vectorQuery.inputs.size)
+                    put("vectorQueryStrategy", vectorQuery.strategy)
                     // 词法视图只记策略/数量/哈希，不保存 query、词元明文或正文。
                     put("lexicalStrategy", lexicalTerms.strategy)
                     put("lexicalTermCount", lexicalTerms.atoms.size)

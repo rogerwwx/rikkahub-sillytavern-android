@@ -49,19 +49,21 @@ object SemanticMemoryCoreSmoke {
         check(semanticCjkBigramQuery("龙井茶") == "\"龙井\" OR \"井茶\"")
         check(semanticCjkBigramQuery("matcha 2024").isEmpty())
 
-        // score 融合：两路各自 min-max 后按 0.5/0.5 平均，两路共识按名次差加成 0.25。
+        // 显式参数公式验证：两路 min-max 后按 0.5/0.5 平均，共识按名次差加成 0.25。
         val fused = fuseSemanticScores(
             lexical = listOf("a" to 1.0, "b" to 0.0),
             vector = listOf("a" to 1.0, "c" to 0.0),
+            bm25Weight = 0.5, agreementBonus = 0.25,
         )
         check(fused.map { it.id } == listOf("a", "b", "c"))
         near(fused[0].score, 1.25)
         near(fused[1].score, 0.0)
         near(fused[2].score, 0.0)
-        // 名次差越大共识加成越小：lexical 第 1 与 vector 第 2 只拿 0.25*(1-1/3)。
+        // 显式参数的共识随名次差减小：lexical 第 1 与 vector 第 2 只拿 0.25*(1-1/3)。
         val gap = fuseSemanticScores(
             lexical = listOf("x" to 1.0, "y" to 0.5, "z" to 0.0),
             vector = listOf("y" to 1.0, "x" to 0.5, "w" to 0.0),
+            bm25Weight = 0.5, agreementBonus = 0.25,
         )
         near(gap.first { it.id == "x" }.score, 0.5 * 1.0 + 0.5 * 0.5 + 0.25 * (1.0 - 1.0 / 3.0))
         near(gap.first { it.id == "y" }.score, 0.5 * 0.5 + 0.5 * 1.0 + 0.25 * (1.0 - 1.0 / 3.0))

@@ -24,7 +24,7 @@ class SemanticRetrievalRankingTest {
         val before = fuseSemanticScores(lexical, vector).first { it.id == "noise" }
         val after = fuseSemanticScores(lexical, vector.filter { it.second >= 0.4 }).first { it.id == "noise" }
         assertTrue("移除向量证据不应让同一条词法候选升为满分", after.score <= before.score)
-        assertEquals(0.5, after.score, 1e-12)
+        assertEquals(0.2, after.score, 1e-12)
     }
 
     @Test
