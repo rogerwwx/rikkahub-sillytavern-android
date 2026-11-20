@@ -20,6 +20,7 @@ class SemanticMemoryVM(
     private val dreamManager: SemanticDreamManager,
     private val dreamScheduler: SemanticDreamScheduler,
     private val jevAssist: SemanticJevAssist,
+    private val queryPlanner: SemanticQueryPlanner,
 ) : ViewModel() {
     private val maintenance = SemanticMaintenanceManager(repository)
     private val transfers = SemanticTransferManager(repository)
@@ -51,9 +52,17 @@ class SemanticMemoryVM(
     val recallQuery = MutableStateFlow("")
     val recallPreviousAssistant = MutableStateFlow("")
     val recallResult = MutableStateFlow<SemanticRecallResult?>(null)
+    val recallPlan = MutableStateFlow<SemanticSourceRecallPlan?>(null)
+    val recallQueryPlan = MutableStateFlow<SemanticQueryPlan?>(null)
+    val recallPlannedCandidates = MutableStateFlow(0)
+    val recallStatePreview = MutableStateFlow<SemanticStateInjection?>(null)
+    val recallPreviewEstimatedTokens = MutableStateFlow(0)
+    val recallStateNotice = MutableStateFlow<String?>(null)
     val dreamRuns = MutableStateFlow<List<SemanticDreamRunState>>(emptyList())
     val dreamSchedule = MutableStateFlow<SemanticDreamScheduleState?>(null)
     val dreamHistory = MutableStateFlow<SemanticDreamHistory?>(null)
+    val narrativeState = MutableStateFlow<SemanticStateView?>(null)
+    val narrativeStateError = MutableStateFlow<String?>(null)
     val sourcePreview = MutableStateFlow<String?>(null)
     private var importRunner: Job? = null
 
@@ -124,17 +133,64 @@ class SemanticMemoryVM(
         refreshDiagnostics()
     }
 
-    /** 召回测试只读取，不累计召回次数；开启 Jev 时展示重排后的结果，与真实注入保持一致。 */
+    /** 查询规划、重排和预算共用聊天实现；没有真实请求正文，不进行可见性去重。 */
     fun testRecall() = action {
         val text = recallQuery.value.trim()
         val previous = recallPreviousAssistant.value.trim()
         require(text.isNotBlank()) { "请输入召回查询" }
+        recallPlan.value = null
+        recallResult.value = null
+        recallQueryPlan.value = null
+        recallPlannedCandidates.value = 0
+        recallStatePreview.value = null
+        recallPreviewEstimatedTokens.value = 0
+        recallStateNotice.value = null
         val config = repository.assistantSettings(assistantId) ?: error("助手不存在")
-        val base = repository.recall(assistantId, conversationId, text, config, sideEffects = false,
-            previousAssistantMessage = previous)
+        val plannerRevision = queryPlanner.configurationRevision(config)
+        val revision = repository.recallRevision(assistantId, conversationId, config)
+        val sourceRevision = if (config.sourceExpansionEnabled || config.narrativeStateEnabled)
+            dreamManager.sourceRevision() else null
         val recentContext = previous.takeIf { it.isNotBlank() }
             ?.let { "assistant: $it" }.orEmpty()
-        recallResult.value = jevAssist.rerankRecall(assistantId, conversationId, text, recentContext, config, base)
+        val state = if (config.narrativeStateEnabled) dreamManager.narrativeState(assistantId, conversationId) else null
+        val safeState = semanticNarrativePreviewSafe(state, config.narrativeStateEnabled, assistantId, conversationId)
+        val statePreview = if (safeState) planSemanticStateInjection(checkNotNull(state), text,
+            config.dream.normalized().injectionTokenBudget) else null
+        val stateNotice = when {
+            !config.narrativeStateEnabled -> "状态预览已关闭。"
+            !safeState -> "状态覆盖尚有缺口或来源未确认；本次不给查询规划状态，也不预览旧状态注入。"
+            else -> "状态已覆盖当前原文；这里只预览预算，不代表已发送或事实无误。"
+        }
+        val queryPlan = queryPlanner.plan(assistantId, conversationId, current = text, recent = recentContext,
+            history = "", stateText = statePreview?.prompt.orEmpty(), settings = config)
+        val base = repository.recall(assistantId, conversationId, text, config, sideEffects = false,
+            previousAssistantMessage = previous, plannedQueries = queryPlan.queries)
+        val reranked = jevAssist.rerankRecall(assistantId, conversationId, text, recentContext, config, base)
+        val sources = if (config.sourceExpansionEnabled) dreamManager.sourceMessages(assistantId, conversationId) else emptyList()
+        // 读取来源后才检查 live 配置；网络等待或来源维护造成版本变化时不展示旧预览。
+        val validity = inspectSemanticSourceRequest(config, revision, sourceRevision,
+            recallRevision = { repository.recallRevision(assistantId, conversationId, config) },
+            currentSettings = { repository.assistantSettings(assistantId) },
+            currentSourceRevision = dreamManager::sourceRevision)
+        require(validity.summaryCurrent && validity.sourceCurrent) { "配置、记忆或来源已变化，请重新测试" }
+        if (state != null) {
+            val current = dreamManager.narrativeState(assistantId, conversationId)
+            require(current.checkpoint.revision == state.checkpoint.revision &&
+                current.messages.map { it.snapshotHash } == state.messages.map { it.snapshotHash } &&
+                current.pendingMessages == state.pendingMessages) { "状态或来源已变化，请重新测试" }
+        }
+        require(queryPlanner.configurationRevision(config) == plannerRevision) { "规划模型或供应商配置已变化，请重新测试" }
+        require(sourceRevision == null || dreamManager.sourceRevision() == sourceRevision) { "来源已变化，请重新测试" }
+        val narrative = planSemanticNarrativeRequest(statePreview, reranked, config, assistantId, conversationId,
+            messages = sources, query = text)
+        recallQueryPlan.value = queryPlan
+        recallPlannedCandidates.value = semanticPlannedCandidateCount(base.baselineCandidateIds, base.plannedCandidateIds)
+        recallStatePreview.value = narrative.state
+        recallPreviewEstimatedTokens.value = narrative.estimatedTokens
+        recallStateNotice.value = stateNotice
+        recallPlan.value = narrative.source
+        recallResult.value = narrative.source.result
+        message.value = "这是预算预览，不是真实聊天请求；未执行实际可见正文去重"
         refreshDiagnostics()
     }
 
@@ -180,6 +236,12 @@ class SemanticMemoryVM(
 
     fun inspectSources(memoryId: String) = action { sourcePreview.value = dreamManager.readSources(assistantId, conversationId, memoryId) }
 
+    fun inspectStateSources(entryId: String) = action {
+        val view = dreamManager.narrativeState(assistantId, conversationId)
+        val entry = view.checkpoint.entries.singleOrNull { it.id == entryId } ?: error("状态已变化，请重新选择")
+        sourcePreview.value = semanticNarrativeSourcePreview(view, entry)
+    }
+
     fun cancelRebuild(id: String) = action {
         maintenance.cancel(assistantId, conversationId, id)
         SemanticMaintenanceWorker.cancel(context, id)
@@ -196,7 +258,7 @@ class SemanticMemoryVM(
         val text = transfers.export(assistantId, conversationId, ids)
         context.contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
             ?: error("无法写入所选文件")
-        message.value = "语义记忆已导出（内容与元数据，不含向量缓存）"
+        message.value = "语义记忆 JSON 已导出，不含向量缓存和状态检查点；状态随完整数据库备份保留"
     }
 
     fun importFrom(uri: Uri) {
@@ -259,6 +321,14 @@ class SemanticMemoryVM(
         dreamRuns.value = dreamManager.runs(assistantId, conversationId)
         dreamSchedule.value = dreamScheduler.load(assistantId, conversationId)
         dreamHistory.value = dreamManager.history(assistantId, conversationId)
+        try {
+            narrativeState.value = dreamManager.narrativeState(assistantId, conversationId)
+            narrativeStateError.value = null
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) {
+            narrativeState.value = null
+            narrativeStateError.value = "状态读取失败，请重试；当前未展示旧状态。"
+        }
         val items = repository.list(assistantId, conversationId)
         val config = repository.assistantSettings(assistantId)
         val base = config?.let { fingerprintOrNull(it) }

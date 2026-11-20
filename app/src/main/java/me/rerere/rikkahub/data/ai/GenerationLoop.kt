@@ -51,10 +51,36 @@ import me.rerere.rikkahub.data.memory.semantic.SemanticMemoryRepository
 import me.rerere.rikkahub.data.memory.semantic.SemanticMemorySettings
 import me.rerere.rikkahub.data.memory.semantic.SemanticRecallResult
 import me.rerere.rikkahub.data.memory.semantic.SemanticJevAssist
-import me.rerere.rikkahub.data.memory.semantic.budgetSemanticRecall
+import me.rerere.rikkahub.data.memory.semantic.SemanticNarrativeStateStore
+import me.rerere.rikkahub.data.memory.semantic.SemanticQueryPlanner
+import me.rerere.rikkahub.data.memory.semantic.SemanticStateView
+import me.rerere.rikkahub.data.memory.semantic.SemanticStateInjection
+import me.rerere.rikkahub.data.memory.semantic.SemanticNarrativeRequestPlan
+import me.rerere.rikkahub.data.memory.semantic.auditSemanticNarrativeState
+import me.rerere.rikkahub.data.memory.semantic.finalizeSemanticNarrativeRequest
+import me.rerere.rikkahub.data.memory.semantic.planSemanticNarrativeRequest
+import me.rerere.rikkahub.data.memory.semantic.planSemanticStateInjection
+import me.rerere.rikkahub.data.memory.semantic.semanticStatePrefixHash
+import me.rerere.rikkahub.data.memory.semantic.semanticStateTailVisible
+import me.rerere.rikkahub.data.memory.semantic.semanticStateQueryTailVisible
+import me.rerere.rikkahub.data.memory.semantic.inspectSemanticNarrativeAttempt
+import me.rerere.rikkahub.data.memory.semantic.semanticContextExcerpt
+import me.rerere.rikkahub.data.memory.semantic.recordSemanticInjectionSafely
+import me.rerere.rikkahub.data.memory.semantic.semanticInjectionDetails
+import me.rerere.rikkahub.data.memory.semantic.SemanticPreparedRecall
+import me.rerere.rikkahub.data.memory.semantic.prepareSemanticBaselineRecall
 import me.rerere.rikkahub.data.memory.semantic.buildSemanticRecallInput
-import me.rerere.rikkahub.data.memory.semantic.semanticRecallPrompt
+import me.rerere.rikkahub.data.memory.semantic.SemanticSourceRecallPlan
+import me.rerere.rikkahub.data.memory.semantic.auditSemanticSourceRecall
+import me.rerere.rikkahub.data.memory.semantic.dreamMessages
+import me.rerere.rikkahub.data.memory.semantic.finalizeSemanticSourceRecall
 import me.rerere.rikkahub.data.memory.semantic.injectSemanticPrompt
+import me.rerere.rikkahub.data.memory.semantic.inspectSemanticSourceRequest
+import me.rerere.rikkahub.data.memory.semantic.planSemanticSourceRecall
+import me.rerere.rikkahub.data.memory.semantic.readSemanticSourceRequestWindow
+import me.rerere.rikkahub.data.memory.semantic.semanticSourceRequestBoundary
+import me.rerere.rikkahub.data.memory.semantic.SemanticSourceRequestValidity
+import me.rerere.rikkahub.data.memory.semantic.semanticSourceSummaryFallback
 import me.rerere.rikkahub.data.ai.tools.truncateForToolResult
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.data.datastore.Settings
@@ -125,6 +151,8 @@ class GenerationLoop(
     private val semanticJevAssist: SemanticJevAssist,
     private val conversationRepo: ConversationRepository,
     private val pluginToolProvider: me.rerere.rikkahub.plugin.provider.PluginToolProvider,
+    private val semanticStateStore: SemanticNarrativeStateStore,
+    private val queryPlanner: SemanticQueryPlanner,
 ) {
     fun generateText(
         settings: Settings,
@@ -362,13 +390,68 @@ class GenerationLoop(
     // 缓存只属于本轮生成；注入副本不进入 messages，也不形成做梦来源。
     var semanticRevision: String? = null
     var semanticRecall: SemanticRecallResult? = null
-    var injectedSemanticEventId: String? = null
+    var semanticBaselineRevision: String? = null
+    var semanticState: SemanticStateView? = null
+    var semanticPlannerAttempted = false
+    var semanticPlannedQueries = emptyList<String>()
+    var semanticPlanningRevision: String? = null
+    var semanticStateReadFailed = false
+    var semanticPreparationStale = false
+    val frozenSemanticSourceRevision = conversationRepo.sourceRevision()
     val semanticInput = buildSemanticRecallInput(messages, assistant.contextMessageLimit)
-    suspend fun currentSemanticRevision(config: SemanticMemorySettings): String = semanticInput.cacheKey(
+    val semanticBoundaryId = semanticSourceRequestBoundary(messages)
+    val semanticBoundaryMessage = messages.lastOrNull { it.id.toString() == semanticBoundaryId }
+    val semanticHistoryIds = messages.filterNot { it.isSynthetic || it.isContextCheckpoint }
+        .map { it.id.toString() }.toSet()
+    suspend fun readFrozenSemanticState(config: SemanticMemorySettings): SemanticStateView? {
+        if (!config.enabled || !config.narrativeStateEnabled || conversationId == null) return null
+        return try {
+            conversationRepo.withSourceLock {
+                val window = readSemanticSourceRequestWindow(frozenSemanticSourceRevision, semanticBoundaryId,
+                    semanticBoundaryMessage?.role?.name?.lowercase(), semanticBoundaryMessage?.toText(),
+                    conversationRepo::sourceRevision) {
+                    conversationRepo.getConversationById(conversationId)
+                        ?.takeIf { it.assistantId == assistant.id }?.dreamMessages().orEmpty()
+                }
+                if (window.messages.isEmpty()) null else semanticStateStore.read(
+                    assistant.id.toString(), conversationId.toString(), window.messages,
+                ).takeIf { conversationRepo.sourceRevision() == frozenSemanticSourceRevision }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            semanticStateReadFailed = true
+            Log.w(TAG, "narrative_state_read_failed=1")
+            null
+        }
+    }
+    suspend fun currentSemanticBaselineRevision(config: SemanticMemorySettings): String = semanticInput.cacheKey(
         semanticMemoryRepo.recallRevision(assistant.id.toString(), requireNotNull(conversationId).toString(), config),
         if (config.dream.jevEnabled && config.dream.jevRecall) semanticJevAssist.configurationRevision(config.dream) else "",
         config.useAssistantContext,
     )
+    suspend fun currentSemanticRevision(config: SemanticMemorySettings): String {
+        val baseline = currentSemanticBaselineRevision(config)
+        if (!config.narrativeStateEnabled && !config.queryPlanningEnabled) return baseline
+        val state = readFrozenSemanticState(config)
+        val dependency = listOf(baseline,
+            if (config.queryPlanningEnabled) queryPlanner.configurationRevision(config) else "",
+            state?.checkpoint?.revision.orEmpty(),
+            state?.let { semanticStatePrefixHash(it.messages, it.messages.size) }.orEmpty(),
+            if (config.narrativeStateEnabled || config.queryPlanningEnabled)
+                conversationRepo.sourceRevision().toString() else "",
+            if (config.queryPlanningEnabled) semanticInput.historySummary else "")
+        return dependency.joinToString("") { "${it.length}:$it" }
+    }
+    suspend fun baselineSemanticRecall(config: SemanticMemorySettings): SemanticPreparedRecall? {
+        if (!config.enabled || conversationId == null || semanticInput.retrievalQuery.isBlank()) return null
+        return prepareSemanticBaselineRecall(revision = { currentSemanticBaselineRevision(config) }, recall = {
+            val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(),
+                semanticInput.retrievalQuery, config, previousAssistantMessage = semanticInput.previousAssistantMessage)
+            semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(),
+                semanticInput.currentUserMessage, semanticInput.recentContext, config, recalled)
+        })
+    }
     for (stepIndex in 0 until maxSteps) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
             val semanticConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: assistant.semanticMemory.normalized()
@@ -395,29 +478,56 @@ class GenerationLoop(
                     conversationId?.let { id ->
                         UserContextAnchorCache.getOrCreate(id).blocks.removeAll { it.tag == ANCHOR_TAG_MEMORY }
                     }
+                    val baselineRevision = currentSemanticBaselineRevision(semanticConfig)
                     val revision = currentSemanticRevision(semanticConfig)
                     if (revision != semanticRevision) {
+                        semanticState = readFrozenSemanticState(semanticConfig)
+                        if (semanticPlanningRevision != revision) semanticPlannedQueries = emptyList()
+                        if (semanticConfig.queryPlanningEnabled && !semanticPlannerAttempted &&
+                            semanticInput.retrievalQuery.isNotBlank()) {
+                            semanticPlannerAttempted = true
+                            // 规划缺口只以规划器真正收到的有界正文核验，与最终请求校验分开。
+                            val plannerState = semanticState?.takeIf {
+                                semanticStateQueryTailVisible(it, semanticInput.retrievalQuery, semanticInput.recentContext)
+                            }?.let {
+                                planSemanticStateInjection(it, semanticContextExcerpt(
+                                    semanticInput.recentContext + "\n" + semanticInput.retrievalQuery, 2400),
+                                    // 状态文本最多1000估算token，确保planner的4000字符界内不截断行。
+                                    semanticConfig.dream.normalized().injectionTokenBudget.coerceAtMost(2500)).prompt
+                            }.orEmpty()
+                            semanticPlannedQueries = queryPlanner.plan(assistant.id.toString(), conversationId.toString(),
+                                current = semanticInput.retrievalQuery, recent = semanticInput.recentContext,
+                                history = semanticInput.historySummary, stateText = plannerState,
+                                settings = semanticConfig).queries
+                            semanticPlanningRevision = revision
+                        }
                         semanticRecall = if (semanticInput.retrievalQuery.isBlank()) null else {
                             // 重排作用在未按 token 预算裁剪的候选池上；预算只决定最终注入多少。
                             val recalled = semanticMemoryRepo.recall(assistant.id.toString(), conversationId.toString(),
                                 semanticInput.retrievalQuery, semanticConfig,
-                                previousAssistantMessage = semanticInput.previousAssistantMessage)
+                                previousAssistantMessage = semanticInput.previousAssistantMessage,
+                                plannedQueries = semanticPlannedQueries)
                             val reranked = semanticJevAssist.rerankRecall(assistant.id.toString(), conversationId.toString(), semanticInput.currentUserMessage,
                                 semanticInput.recentContext,
                                 semanticConfig, recalled)
-                            budgetSemanticRecall(reranked, semanticConfig)
+                            reranked
                         }
                         semanticRevision = revision
+                        semanticBaselineRevision = baselineRevision
                     }
                 } else {
                     semanticRevision = null
                     semanticRecall = null
+                    semanticState = null
+                    semanticBaselineRevision = null
                 }
                 // Embedding 等待期间的模式/配置变化不能把旧召回带入本次请求。
                 val latestConfig = semanticMemoryRepo.assistantSettings(assistant.id.toString()) ?: semanticConfig
                 if (latestConfig != semanticConfig) {
                     semanticRevision = null
                     semanticRecall = null
+                    semanticState = null
+                    semanticBaselineRevision = null
                     requestAssistant = assistant.copy(semanticMemory = latestConfig)
                     toolsInternal = toolsInternal.filterNot { it.name.startsWith("memory_") || it.name == "memory_tool" } +
                         if (memoryToolsAllowed) buildAssistantMemoryTools(memoryRepo, semanticMemoryRepo, requestAssistant, conversationId?.toString()) else emptyList()
@@ -428,16 +538,21 @@ class GenerationLoop(
                         systemMemoryMode = latestConfig.enabled
                     }
                 }
-                if (semanticRecall != null && conversationId != null && latestConfig.dream.jevEnabled && latestConfig.dream.jevRecall) {
+                if ((semanticRecall != null || semanticState != null) && conversationId != null) {
                     val currentRevision = currentSemanticRevision(latestConfig)
                     if (currentRevision != semanticRevision) {
                         semanticRevision = null
                         semanticRecall = null
+                        semanticState = null
+                        semanticBaselineRevision = null
+                        if (latestConfig.narrativeStateEnabled || latestConfig.queryPlanningEnabled) {
+                            semanticPreparationStale = true
+                            semanticPlannedQueries = emptyList()
+                            val fallback = baselineSemanticRecall(latestConfig)
+                            semanticBaselineRevision = fallback?.revision
+                            semanticRecall = fallback?.result
+                        }
                     }
-                }
-                semanticRecall?.takeIf { it.hits.isNotEmpty() && it.eventId != injectedSemanticEventId }?.let {
-                    semanticMemoryRepo.recordInjection(it)
-                    injectedSemanticEventId = it.eventId
                 }
                 generateInternal(
                     assistant = requestAssistant,
@@ -488,7 +603,24 @@ class GenerationLoop(
                     workspaceCwd = workspaceCwd,
                     generationType = generationType,
                     maxTokensOverride = maxTokensOverride,
-                    semanticPrompt = semanticRecall?.let(::semanticRecallPrompt).orEmpty(),
+                    semanticRecall = semanticRecall,
+                    semanticRevision = semanticBaselineRevision,
+                    semanticRecallRevision = ::currentSemanticBaselineRevision,
+                    semanticState = semanticState,
+                    semanticPreparationRevision = semanticRevision,
+                    semanticPreparationRevisionReader = ::currentSemanticRevision,
+                    semanticUsesPlannedQueries = semanticPlannedQueries.isNotEmpty(),
+                    semanticBaselineFallback = { baselineSemanticRecall(latestConfig) },
+                    semanticStateReadFailed = semanticStateReadFailed,
+                    semanticPreparationStale = semanticPreparationStale,
+                    semanticBoundaryId = semanticBoundaryId,
+                    semanticHistoryIds = semanticHistoryIds,
+                    semanticQuery = semanticInput.retrievalQuery,
+                    semanticStateQuery = semanticContextExcerpt(
+                        semanticInput.recentContext + "\n" + semanticInput.retrievalQuery, 2400),
+                    frozenSemanticSourceRevision = frozenSemanticSourceRevision,
+                    semanticBoundaryRole = semanticBoundaryMessage?.role?.name?.lowercase(),
+                    semanticBoundaryText = semanticBoundaryMessage?.toText(),
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
@@ -735,7 +867,23 @@ class GenerationLoop(
         generationType: me.rerere.rikkahub.data.model.GenerationType = me.rerere.rikkahub.data.model.GenerationType.NORMAL,
         maxTokensOverride: Int? = null,
         prebuiltRecentChats: String = "",
-        semanticPrompt: String = "",
+        semanticRecall: SemanticRecallResult? = null,
+        semanticRevision: String? = null,
+        semanticRecallRevision: (suspend (SemanticMemorySettings) -> String)? = null,
+        semanticBoundaryId: String? = null,
+        semanticHistoryIds: Set<String> = emptySet(),
+        semanticQuery: String = "",
+        semanticStateQuery: String = semanticQuery,
+        frozenSemanticSourceRevision: Long? = null,
+        semanticBoundaryRole: String? = null,
+        semanticBoundaryText: String? = null,
+        semanticState: SemanticStateView? = null,
+        semanticPreparationRevision: String? = null,
+        semanticPreparationRevisionReader: (suspend (SemanticMemorySettings) -> String)? = null,
+        semanticUsesPlannedQueries: Boolean = false,
+        semanticBaselineFallback: (suspend () -> SemanticPreparedRecall?)? = null,
+        semanticStateReadFailed: Boolean = false,
+        semanticPreparationStale: Boolean = false,
     ) {
         val limitedChat = messages.limitContext(assistant.contextMessageLimit)
         // 酒馆模式：请求中只保留原版酒馆的上下文构成（角色卡/世界书/示例消息/作者注释）
@@ -745,7 +893,7 @@ class GenerationLoop(
             val pluginPrompts = pluginToolProvider.getPluginSystemPrompts()
             if (pluginPrompts.isEmpty()) "" else pluginPrompts.joinToString("\n\n")
         }
-        val internalMessages = buildList {
+        val requestBase = buildList {
             // 延迟构建：prebuiltSystemMessages 几乎总是非空，fallback 每步白算一遍是纯浪费
             val fallbackSystem = { buildString {
                 // ── s10: 使用 SystemPromptAssembler 替代硬编码 ──
@@ -1009,30 +1157,87 @@ class GenerationLoop(
             } else {
                 base
             }
-        }.let { request ->
-            injectSemanticPrompt(request, semanticPrompt, assistant.semanticMemory, limitedChat.size,
-                authorNotePosition = settings.authorNotePosition, authorNoteDepth = settings.authorNoteDepth)
-        }.transforms(
-            transformers = transformers,
-            context = context,
-            model = model,
-            assistant = assistant,
-            settings = settings,
-            conversationModeInjectionIds = conversationModeInjectionIds,
-            conversationLorebookIds = conversationLorebookIds,
-            processingStatus = processingStatus,
-            workspaceCwd = workspaceCwd,
-            conversationId = conversationId,
-            generationType = generationType,
-            chatUserMessageCount = messages.count { it.role == MessageRole.USER },
-            chatMessageCount = limitedChat.size,
-        )
+        }
+        // 只缓存召回；每次工具续轮从来源锁内重新读取当前分支，并受冻结请求上界约束。
+        var semanticSourceRevision: Long? = null
+        var boundaryFilters = emptyMap<String, Int>()
+        val sourceMessages = if (semanticRecall != null && assistant.semanticMemory.sourceExpansionEnabled &&
+            conversationId != null && frozenSemanticSourceRevision != null) {
+            conversationRepo.withSourceLock {
+                semanticSourceRevision = frozenSemanticSourceRevision
+                val window = readSemanticSourceRequestWindow(frozenSemanticSourceRevision,
+                    semanticBoundaryId, semanticBoundaryRole, semanticBoundaryText, conversationRepo::sourceRevision) {
+                    conversationRepo.getConversationById(conversationId)
+                        ?.takeIf { it.assistantId == assistant.id }?.dreamMessages().orEmpty()
+                }
+                boundaryFilters = window.filters
+                window.messages
+            }
+        } else emptyList()
+        var selectedSemanticRecall = semanticRecall
+        var expectedSemanticRevision = semanticRevision
+        var activeSemanticState = semanticState?.let {
+            planSemanticStateInjection(it, semanticStateQuery, assistant.semanticMemory.dream.normalized().injectionTokenBudget)
+        }?.takeIf { it.prompt.isNotBlank() }
+        var usesPlannedQueries = semanticUsesPlannedQueries
+        val emptyRecall = SemanticRecallResult(emptyList(), 0, 0, emptyMap(), emptyList(), 0, "")
+        fun buildSemanticPlan(state: SemanticStateInjection?, allowSources: Boolean = true): SemanticSourceRecallPlan? {
+            val recalled = selectedSemanticRecall ?: if (state != null ||
+                (assistant.semanticMemory.narrativeStateEnabled && semanticStateReadFailed)) emptyRecall else return null
+            val config = if (allowSources) assistant.semanticMemory
+                else assistant.semanticMemory.copy(sourceExpansionEnabled = false)
+            val combined = planSemanticNarrativeRequest(state, recalled, config, assistant.id.toString(),
+                conversationId?.toString().orEmpty(), messages = sourceMessages, query = semanticQuery)
+            activeSemanticState = combined.state
+            return combined.source.copy(filters = combined.source.filters + boundaryFilters +
+                (if (semanticStateReadFailed) mapOf("state_read_failed" to 1) else emptyMap()) +
+                (if (semanticPreparationStale) mapOf("state_request_stale" to 1) else emptyMap()))
+        }
+        var semanticPlan = buildSemanticPlan(activeSemanticState)
+        suspend fun transformRequest(plan: SemanticSourceRecallPlan?, state: SemanticStateInjection? = activeSemanticState): List<UIMessage> =
+            injectSemanticPrompt(requestBase, state?.prompt.orEmpty() + plan?.prompt.orEmpty(), assistant.semanticMemory, limitedChat.size,
+                authorNotePosition = settings.authorNotePosition, authorNoteDepth = settings.authorNoteDepth).transforms(
+                transformers = transformers,
+                context = context,
+                model = model,
+                assistant = assistant,
+                settings = settings,
+                conversationModeInjectionIds = conversationModeInjectionIds,
+                conversationLorebookIds = conversationLorebookIds,
+                processingStatus = processingStatus,
+                workspaceCwd = workspaceCwd,
+                conversationId = conversationId,
+                generationType = generationType,
+                chatUserMessageCount = messages.count { it.role == MessageRole.USER },
+                chatMessageCount = limitedChat.size,
+            )
 
+        var internalMessages = transformRequest(semanticPlan)
+        semanticPlan?.let { plan ->
+            val final = finalizeSemanticNarrativeRequest(SemanticNarrativeRequestPlan(activeSemanticState, plan),
+                semanticState, internalMessages, semanticHistoryIds)
+            if (final.requiresRebuild) {
+                activeSemanticState = null
+                semanticPlan = buildSemanticPlan(null)?.let {
+                    it.copy(filters = it.filters + ("state_request_gap" to 1))
+                }
+                internalMessages = transformRequest(semanticPlan, null)
+                semanticPlan?.let { fallback ->
+                    val pruned = finalizeSemanticSourceRecall(fallback, internalMessages, semanticHistoryIds)
+                    semanticPlan = pruned.plan
+                    internalMessages = pruned.messages
+                }
+            } else {
+                semanticPlan = final.plan.source
+                internalMessages = final.messages
+            }
+        }
+        if (semanticPlan?.excerpts.isNullOrEmpty()) semanticSourceRevision = null
         // 系统提示词转义：将所有消息中的 < > 转为 HTML 实体，绕过中转站 WAF 拦截
         // 不仅转义 SYSTEM 消息（工具提示词、system-reminder），也转义 USER 消息
         // 中的 XML 标签（如 <time_reminder>），避免任何角色的消息触发 WAF
-        val escapedMessages = if (settings.huadengSettings.enableSystemPromptEscape) {
-            internalMessages.map { msg ->
+        fun escapeRequest(request: List<UIMessage>): List<UIMessage> = if (settings.huadengSettings.enableSystemPromptEscape) {
+            request.map { msg ->
                 msg.copy(
                     parts = msg.parts.map { part ->
                         if (part is UIMessagePart.Text) {
@@ -1044,15 +1249,140 @@ class GenerationLoop(
                 )
             }
         } else {
-            internalMessages
+            request
         }
 
-        // 提示词查看器：缓存最终发送给模型的完整消息列表（转义后），供聊天抽屉"查看提示词"调试入口渲染。
-        // 插件注入的提示词先登记为遮蔽片段，避免该调试入口成为插件内容的提取通道。
-        PromptDebugCache.setRedactions(
-            if (pluginSystemPromptText.isNotBlank()) listOf(pluginSystemPromptText) else emptyList()
+        var escapedMessages = escapeRequest(internalMessages)
+        var semanticDiscarded = false
+        val stateOnlyEvent = me.rerere.rikkahub.data.memory.semantic.SemanticDiagnosticEvent(
+            assistantId = assistant.id.toString(), conversationId = conversationId?.toString(),
+            operation = "recall", purpose = "recall", status = "success",
         )
-        PromptDebugCache.store(conversationId, escapedMessages)
+        suspend fun finalRequestForAttempt(emptyRetryCount: Int): List<UIMessage> {
+            suspend fun record(request: List<UIMessage>) {
+                semanticPlan?.let { finalPlan ->
+                    val texts = request.flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }.map { it.text }
+                    val stateAudit = auditSemanticNarrativeState(SemanticNarrativeRequestPlan(activeSemanticState, finalPlan),
+                        texts, settings.huadengSettings.enableSystemPromptEscape)
+                    val auditedPlan = if (assistant.semanticMemory.narrativeStateEnabled) finalPlan.copy(
+                        filters = finalPlan.filters + stateAudit,
+                        estimatedTokens = SemanticNarrativeRequestPlan(activeSemanticState, finalPlan).estimatedTokens,
+                    ) else finalPlan
+                    val audit = auditSemanticSourceRecall(selectedSemanticRecall?.hits.orEmpty().map { it.memory.id }, auditedPlan,
+                        texts, settings.huadengSettings.enableSystemPromptEscape)
+                    if (auditedPlan.result.eventId.isNotBlank()) semanticMemoryRepo.recordInjection(auditedPlan, audit)
+                    else if (assistant.semanticMemory.narrativeStateEnabled) recordSemanticInjectionSafely {
+                        semanticMemoryRepo.dao.putEvent(stateOnlyEvent.copy(detailJson = semanticInjectionDetails(
+                            buildJsonObject {}, auditedPlan, audit).toString()))
+                    }
+                }
+            }
+            var request = if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount) else escapedMessages
+            record(request)
+            val plan = semanticPlan
+            suspend fun validity(): SemanticSourceRequestValidity =
+                if (expectedSemanticRevision == null || semanticRecallRevision == null) SemanticSourceRequestValidity(false, false)
+                else inspectSemanticSourceRequest(assistant.semanticMemory, requireNotNull(expectedSemanticRevision), semanticSourceRevision,
+                    recallRevision = { semanticRecallRevision(assistant.semanticMemory) },
+                    currentSettings = { semanticMemoryRepo.assistantSettings(assistant.id.toString()) },
+                    currentSourceRevision = conversationRepo::sourceRevision)
+            suspend fun discardSemanticRequest() {
+                semanticDiscarded = true
+                activeSemanticState = null
+                semanticSourceRevision = null
+                semanticPlan = semanticPlan?.let { it.copy(filters = it.filters + ("semantic_request_stale" to 1)) }
+                escapedMessages = escapeRequest(transformRequest(null, null))
+                request = if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount) else escapedMessages
+                record(request)
+            }
+            // 诊断写入可能挂起；最后的版本检查必须在它之后，避免写日志期间来源变化。
+            if (plan != null && !semanticDiscarded) {
+                if (assistant.semanticMemory.narrativeStateEnabled || assistant.semanticMemory.queryPlanningEnabled) {
+                    // 最多两次重组；检查都在record之后，成功检查与Provider之间没有挂起调用。
+                    for (checkIndex in 0..2) {
+                        val statePresent = activeSemanticState
+                        val finalPlan = semanticPlan
+                        val stateVisible = statePresent == null || (semanticState != null && finalPlan != null &&
+                            semanticStateTailVisible(semanticState, request, listOf(statePresent.prompt, finalPlan.prompt),
+                                settings.huadengSettings.enableSystemPromptEscape) &&
+                            auditSemanticNarrativeState(SemanticNarrativeRequestPlan(statePresent, finalPlan),
+                                request.flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }.map { it.text },
+                                settings.huadengSettings.enableSystemPromptEscape)["state_confirmed"] == 1)
+                        var current = SemanticSourceRequestValidity(false, false)
+                        var dependenciesCurrent = true
+                        val needsSource = statePresent != null || usesPlannedQueries || semanticSourceRevision != null
+                        val valid = if (needsSource && frozenSemanticSourceRevision != null) {
+                            inspectSemanticNarrativeAttempt(frozenSemanticSourceRevision,
+                                baselineCurrent = {
+                                    current = validity()
+                                    current.summaryCurrent && current.sourceCurrent
+                                },
+                                dependenciesCurrent = {
+                                    dependenciesCurrent = if (statePresent == null && !usesPlannedQueries) true else
+                                        semanticPreparationRevision != null && semanticPreparationRevisionReader != null &&
+                                            semanticPreparationRevisionReader(assistant.semanticMemory) == semanticPreparationRevision
+                                    dependenciesCurrent && stateVisible
+                                }, currentSourceRevision = conversationRepo::sourceRevision)
+                        } else {
+                            current = validity()
+                            current.summaryCurrent
+                        }
+                        if (valid) break
+                        if (!current.summaryCurrent || checkIndex == 2) {
+                            discardSemanticRequest()
+                            break
+                        }
+                        // 依赖或尾部缺口失效从基底恢复原查询与完整预算，不再次调用规划模型。
+                        activeSemanticState = null
+                        if (usesPlannedQueries) {
+                            val fallback = semanticBaselineFallback?.invoke()
+                            selectedSemanticRecall = fallback?.result
+                            expectedSemanticRevision = fallback?.revision
+                        }
+                        usesPlannedQueries = false
+                        val sourcesCurrent = conversationRepo.sourceRevision() == frozenSemanticSourceRevision
+                        semanticPlan = buildSemanticPlan(null, sourcesCurrent)?.let {
+                            it.copy(filters = it.filters + mapOf(
+                                "state_request_gap" to if (stateVisible) 0 else 1,
+                                "state_request_stale" to if (dependenciesCurrent && sourcesCurrent) 0 else 1,
+                            ))
+                        }
+                        if (!sourcesCurrent) semanticSourceRevision = null
+                        internalMessages = transformRequest(semanticPlan, null)
+                        semanticPlan?.let { fallback ->
+                            val pruned = finalizeSemanticSourceRecall(fallback, internalMessages, semanticHistoryIds)
+                            semanticPlan = pruned.plan
+                            internalMessages = pruned.messages
+                        }
+                        if (semanticPlan?.excerpts.isNullOrEmpty()) semanticSourceRevision = null
+                        escapedMessages = escapeRequest(internalMessages)
+                        request = if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount) else escapedMessages
+                        record(request)
+                    }
+                } else {
+                    val current = validity()
+                    if (!current.summaryCurrent) {
+                        discardSemanticRequest()
+                    } else if (!current.sourceCurrent) {
+                        // 全局来源修订变化仅撤下证据；从基底重新转换，避免漏掉已改写的旧证据。
+                        semanticPlan = semanticSourceSummaryFallback(plan, requireNotNull(semanticRecall),
+                            assistant.semanticMemory, assistant.id.toString(), conversationId?.toString().orEmpty())
+                        semanticSourceRevision = null
+                        escapedMessages = escapeRequest(transformRequest(semanticPlan))
+                        request = if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount) else escapedMessages
+                        record(request)
+                        // 摘要回退最多重组一次；等待转换期间记忆/配置失效则再组装无注入基底。
+                        if (!validity().summaryCurrent) discardSemanticRequest()
+                    }
+                }
+            }
+            // 逐字审计和调试查看器都读取本次真正交给 Provider 的转换、转义后请求。
+            PromptDebugCache.setRedactions(
+                if (pluginSystemPromptText.isNotBlank()) listOf(pluginSystemPromptText) else emptyList()
+            )
+            PromptDebugCache.store(conversationId, request)
+            return request
+        }
 
         var messages: List<UIMessage> = messages
         // 酒馆模式且不保留工具：模型级内置工具（搜索/URL 上下文等）同样不进请求
@@ -1099,9 +1429,7 @@ class GenerationLoop(
                     val streamChunkHandler = StreamChunkHandler(model)
                     var attemptMessages = responseBaseMessages
                     // 防空回复：重试时对请求副本的末条用户消息做微扰（历史消息不动）
-                    val requestMessages =
-                        if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount)
-                        else escapedMessages
+                    val requestMessages = finalRequestForAttempt(emptyRetryCount)
                     try {
                         providerImpl.streamText(
                             providerSetting = provider,
@@ -1159,13 +1487,11 @@ class GenerationLoop(
                 // 每次空回复重试都基于同一快照合并结果，避免把空回复消息残留在历史里
                 val baseMessages = responseBaseMessages
                 while (true) {
-                    val requestMessages =
-                        if (emptyRetryCount > 0) escapedMessages.perturbForEmptyRetry(emptyRetryCount)
-                        else escapedMessages
                     val result = executeProviderRequestWithRetry(
                         processingStatus = processingStatus,
                         enabled = settings.networkSetting.enableAutoRetry,
                     ) {
+                        val requestMessages = finalRequestForAttempt(emptyRetryCount)
                         providerImpl.generateText(
                             providerSetting = provider,
                             messages = requestMessages,

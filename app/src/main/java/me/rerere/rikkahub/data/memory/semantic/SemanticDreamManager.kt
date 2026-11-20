@@ -34,6 +34,7 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
 data class SemanticDreamPending(val assistantId: String, val conversationId: String, val turns: Int)
+/** changed 包括记忆条目与剧情状态格子的变化数；仅推进状态覆盖时可以为0。 */
 data class SemanticDreamRun(val status: String, val processedSegments: Int = 0, val changed: Int = 0, val error: String? = null)
 
 @Serializable
@@ -44,6 +45,7 @@ data class SemanticDreamRunState(
     val operation: String = "reflection", val selectedIds: List<String> = emptyList(),
     /** auto/periodic 由后台触发，manual/range 由用户点按触发。 */
     val trigger: String = "auto",
+    val mode: String = "reflection", val baseStateRevision: String? = null,
 )
 
 @Serializable
@@ -62,6 +64,7 @@ class SemanticDreamManager(
     private val jev: SemanticJevAssist,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val narrativeStore = SemanticNarrativeStateStore(repository)
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val running = ConcurrentHashMap<String, Pair<String?, Job>>()
     private data class RecallValidation(val key: String, val nextExpiry: Long)
@@ -117,18 +120,33 @@ class SemanticDreamManager(
 
     suspend fun pendingOf(conversation: Conversation): SemanticDreamPending? {
         val assistantId = conversation.assistantId.toString()
-        repository.assistantSettings(assistantId)?.takeIf { it.enabled } ?: return null
+        val config = repository.assistantSettings(assistantId)?.takeIf { it.enabled } ?: return null
         val messages = conversation.dreamMessages()
-        val cursor = cursor(assistantId, conversation.id.toString())
-        window(conversation.id.toString(), messages, cursor) ?: return null
-        val count = dreamHistory(messages, cursor).pendingTurns
-        return SemanticDreamPending(assistantId, conversation.id.toString(), count)
+        val conversationId = conversation.id.toString()
+        val cursor = cursor(assistantId, conversationId)
+        val memoryWindow = window(conversationId, messages, cursor)
+        val stateWindow = if (config.narrativeStateEnabled) {
+            val view = narrativeStore.read(assistantId, conversationId, messages)
+            semanticStateWindow(conversationId, messages, view.checkpoint.coveredCount)
+        } else null
+        if (memoryWindow == null && stateWindow == null) return null
+        val count = maxOf(if (memoryWindow != null) dreamHistory(messages, cursor).pendingTurns else 0,
+            stateWindow?.completeTurns ?: 0)
+        return SemanticDreamPending(assistantId, conversationId, count)
     }
 
     suspend fun history(assistantId: String, conversationId: String): SemanticDreamHistory? {
         val snapshot = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId } ?: return null
         return dreamHistory(snapshot.messages, cursor(assistantId, conversationId))
     }
+
+    /** 只读当前助手和当前分支的有效检查点；未完成原文的覆盖缺口也保留给界面。 */
+    suspend fun narrativeState(assistantId: String, conversationId: String): SemanticStateView =
+        conversationRepo.withSourceLock {
+            val conversation = conversationRepo.getConversationById(Uuid.parse(conversationId))
+                ?.takeIf { it.assistantId.toString() == assistantId } ?: error("当前对话已删除或移出助手")
+            narrativeStore.read(assistantId, conversationId, conversation.dreamMessages())
+        }
 
     suspend fun selectRange(assistantId: String, conversationId: String, startMessageId: String? = null,
         endMessageId: String? = null): SemanticDreamRange {
@@ -141,10 +159,10 @@ class SemanticDreamManager(
 
     suspend fun pendingAssistants(): List<String> = settingsStore.awaitLoaded().assistants
         .filter { it.semanticMemory.enabled && it.semanticMemory.dream.automatic }.map { it.id.toString() }
-        .filter { id -> conversations(id).any { hasPending(it) } || repository.dao.jobs(id).any { it.kind == "dream_embedding" } }
+        .filter { id -> conversations(id).any { hasPending(it) } || repository.dao.jobHeaders(id).any { it.kind == "dream_embedding" } }
 
-    suspend fun runs(assistantId: String, conversationId: String? = null): List<SemanticDreamRunState> = repository.dao.jobs(assistantId)
-        .filter { it.kind == "dream_run" && (conversationId == null || it.conversationId == conversationId) }.map { job ->
+    suspend fun runs(assistantId: String, conversationId: String? = null): List<SemanticDreamRunState> =
+        repository.dao.jobsOfKind(assistantId, "dream_run", conversationId).map { job ->
             val state = json.decodeFromString<SemanticDreamRunState>(job.payloadJson)
             if (state.status == "running" && running[assistantId] == null) {
                 state.copy(status = "interrupted", error = "上次进程中断，来源游标保留").also { putRun(assistantId, it) }
@@ -154,6 +172,16 @@ class SemanticDreamManager(
     suspend fun cancel(assistantId: String, conversationId: String? = null) {
         running[assistantId]?.takeIf { conversationId == null || it.first == conversationId }?.second?.cancel()
     }
+
+    /** 只暴露修订号，供预算预览在挂起读取之后核验来源。 */
+    fun sourceRevision(): Long = conversationRepo.sourceRevision()
+
+    /** planner 专用类型化读取；来源锁下确认助手与当前分支，不进入原文快照缓存。 */
+    suspend fun sourceMessages(assistantId: String, conversationId: String): List<DreamMessage> =
+        conversationRepo.withSourceLock {
+            conversationRepo.getConversationById(Uuid.parse(conversationId))
+                ?.takeIf { it.assistantId.toString() == assistantId }?.dreamMessages().orEmpty()
+        }
 
     suspend fun readSources(assistantId: String, conversationId: String, memoryId: String): String {
         val memory = repository.get(assistantId, conversationId, memoryId) ?: error("记忆已删除")
@@ -185,7 +213,7 @@ class SemanticDreamManager(
         maintainLifecycle(assistantId, conversationId)
         drainEmbedding(assistantId, conversationId)
         for (conversation in conversations(assistantId, conversationId)) {
-            val before = segments
+            val before = if (automatic) cursor(assistantId, conversation.id.toString()).successfulRuns else 0
             while (true) {
                 currentCoroutineContext().ensureActive()
                 val result = process(assistantId, conversation.id.toString(), automatic) ?: break
@@ -193,7 +221,8 @@ class SemanticDreamManager(
                 changed += result.changed
                 if (result.status != "completed") return@exclusive result.copy(processedSegments = segments, changed = changed)
             }
-            if (automatic && segments > before) autoOrganize(assistantId, conversation.id.toString(), settings)
+            if (automatic && cursor(assistantId, conversation.id.toString()).successfulRuns > before)
+                autoOrganize(assistantId, conversation.id.toString(), settings)
         }
         val remaining = conversations(assistantId, conversationId).any { hasPending(it) }
         SemanticDreamRun(if (remaining) "pending" else "completed", segments, changed)
@@ -282,9 +311,12 @@ class SemanticDreamManager(
         val progressCursor = if (range == null) oldCursor else cursor(assistantId, conversationId, range.id)
         val positions = range?.positions(snapshot.messages) ?: (0..snapshot.messages.lastIndex)
         // 自动做梦一次取全部待处理轮次；手动按设置里的分块轮数，0 表示整段一次请求。
-        val window = window(conversationId, snapshot.messages, progressCursor, positions,
-            includeIncomplete = range != null, maxTurns = if (automatic) 0 else config.dream.manualChunkTurns)
-            ?: return null
+        val checkpoint = if (config.narrativeStateEnabled && range == null)
+            narrativeStore.read(assistantId, conversationId, snapshot.messages).checkpoint else null
+        val plan = planSemanticDreamState(conversationId, snapshot.messages, progressCursor, checkpoint,
+            maxTurns = if (automatic) 0 else config.dream.manualChunkTurns,
+            positions = positions, includeIncomplete = range != null) ?: return null
+        val window = plan.window
         val modelSettings = settingsStore.awaitLoaded()
         val stream = modelSettings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
             ?: error("助手已删除")
@@ -292,9 +324,11 @@ class SemanticDreamManager(
         val model = modelId?.let { modelSettings.findModelById(it) } ?: error("做梦模型已失效，请重新选择")
         val providerSetting = model.findProvider(modelSettings.providers)?.takeIf { it.enabled }
             ?.copyProvider() ?: error("做梦提供商已失效")
-        val signature = dreamHash(stream.toString() + json.encodeToString(config.dream) + json.encodeToString(providerSetting) + json.encodeToString(model))
+        val signature = dreamHash(stream.toString() + json.encodeToString(config.dream) + json.encodeToString(providerSetting) +
+            json.encodeToString(model) + if (config.narrativeStateEnabled) ":narrative_state" else "")
         val cursorRevision = dreamHash(json.encodeToString(oldCursor))
-        val runId = "dream_run:" + dreamHash("$assistantId:$conversationId:${range?.id ?: ""}:${window.evidence.joinToString { it.evidenceId }}:$signature:$cursorRevision")
+        val modeRevision = if (checkpoint == null) "" else ":${plan.mode}:${checkpoint.revision}:${plan.updateState}"
+        val runId = "dream_run:" + dreamHash("$assistantId:$conversationId:${range?.id ?: ""}:${window.evidence.joinToString { it.evidenceId }}:$signature:$cursorRevision$modeRevision")
         val previous = repository.dao.getJob(runId)?.let { json.decodeFromString<SemanticDreamRunState>(it.payloadJson) }
         if (previous?.status == "completed") return SemanticDreamRun("failed", error = "运行已经提交但来源游标不匹配，请检查恢复来源")
         val now = System.currentTimeMillis()
@@ -302,7 +336,7 @@ class SemanticDreamManager(
         if (automatic && previous?.status == "failed" && previous.nextRetryAt > now) return SemanticDreamRun("pending")
         val attempts = if (!automatic && previous?.status in setOf("failed", "cancelled")) 1 else (previous?.attempts ?: 0) + 1
         val state = SemanticDreamRunState(runId, conversationId, "running", attempts,
-            evidence = window.evidence, trigger = trigger)
+            evidence = window.evidence, trigger = trigger, mode = plan.mode, baseStateRevision = checkpoint?.revision)
         putRun(assistantId, state)
         var committed = false
         var committedChanges = 0
@@ -310,19 +344,27 @@ class SemanticDreamManager(
             val query = window.evidence.filter { it.role == "user" }.joinToString("\n") {
                 snapshot.messages[it.position].text.substring(it.start, it.end)
             }.take(2000)
-            val recalled = if (query.isNotBlank()) {
+            val recalled = if (!plan.stateOnly && query.isNotBlank()) {
                 val result = repository.recall(assistantId, conversationId, query, config)
                 jev.rerankRecall(assistantId, conversationId, query, window.context, config, result).hits.map { it.memory }
             } else emptyList()
-            val core = repository.list(assistantId, conversationId).filter { it.isCore && it.status == "active" }.take(config.coreBudget)
+            val core = if (plan.stateOnly) emptyList() else repository.list(assistantId, conversationId)
+                .filter { it.isCore && it.status == "active" }.take(config.coreBudget)
             val candidates = (recalled + core).distinctBy { it.id }
-            val systemPrompt = config.dream.reflectionSystemPrompt()
+            val systemPrompt = config.dream.reflectionSystemPrompt(narrativeStateEnabled = checkpoint != null,
+                stateOnly = plan.stateOnly, updateState = plan.updateState)
             // 旧事实只用于比较，不做条数或长度截断；相关候选由召回与核心名额决定。
             val oldContext = candidates.joinToString("\n") {
                 val evidence = dreamSources(it).filter { source -> source.valid }.maxByOrNull { source -> source.createdAt }
                 "[旧事实 id=${it.id} version=${it.contentVersion} scope=${dreamMetadata(it)["scope"] ?: "unknown"} latestEvidence=${evidence?.createdAtText ?: evidence?.createdAt ?: "unknown"}] ${it.content}"
             }
-            val input = "[上一片衔接状态，仅用于理解]\n${window.nextCursor.continuity}\n[重叠原文，仅用于理解]\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n${window.transcript}"
+            val stateContext = checkpoint?.let {
+                "[剧情状态基础版本 baseRevision=${it.revision}，截至前${it.coveredCount}条原文]\n" +
+                    renderSemanticStateForExtraction(it) + "\n"
+            }.orEmpty()
+            val input = if (plan.stateOnly) stateContext + window.transcript else
+                "[上一片衔接状态，仅用于理解]\n${window.nextCursor.continuity}\n[重叠原文，仅用于理解]\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n" +
+                    stateContext + window.transcript
             val params = TextGenerationParams(model = model, temperature = config.dream.temperature.toFloat(),
                 reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
                 customHeaders = model.customHeaders,
@@ -330,7 +372,8 @@ class SemanticDreamManager(
             val response = usageRecorder.wrap(providerManager.getProviderByType(providerSetting),
                 UsageTag(UsageSource.MEMORY, Uuid.parse(assistantId), conversation.id))
                 .generateTextComplete(providerSetting, listOf(UIMessage.system(systemPrompt), UIMessage.user(input)), params, stream)
-            val draft = parseDreamDraft(response.message.toText())
+            val draft = parseDreamDraft(response.message.toText(), checkpoint?.revision, plan.stateOnly)
+            require(plan.updateState || draft.state?.changes.isNullOrEmpty()) { "非连续记忆窗口不能修改全局剧情状态" }
             var changed = 0
             conversationRepo.withSourceLock {
                 require(config(assistantId) == config) { "做梦设置或模式已变化" }
@@ -339,25 +382,48 @@ class SemanticDreamManager(
                 val liveModel = liveSettings.findModelById(model.id)
                 val liveProvider = liveModel?.findProvider(liveSettings.providers)
                 require(liveModel != null && liveProvider != null && dreamHash(stream.toString() + json.encodeToString(config.dream) +
-                    json.encodeToString(liveProvider.copyProvider()) + json.encodeToString(liveModel)) == signature) { "做梦模型或端点已变化" }
+                    json.encodeToString(liveProvider.copyProvider()) + json.encodeToString(liveModel) +
+                    if (config.narrativeStateEnabled) ":narrative_state" else "") == signature) { "做梦模型或端点已变化" }
                 val latest = sourceSnapshot(conversationId)?.takeIf { it.conversation.assistantId.toString() == assistantId }
                     ?: error("来源对话已删除或换助手")
                 range?.positions(latest.messages)
                 require(validDreamSources(window.nextCursor.processed, latest.messages)) { "来源消息已编辑或切换分支" }
                 repository.database.withTransaction {
+                    currentCoroutineContext().ensureActive()
+                    require(config(assistantId) == config) { "做梦设置或模式已变化" }
                     require(cursor(assistantId, conversationId) == oldCursor) { "做梦游标已变化" }
                     if (range != null) require(cursor(assistantId, conversationId, range.id) == progressCursor) { "手动范围进度已变化" }
-                    val mutations = planDreamChanges(assistantId, runId, draft, window, repository.list(assistantId, conversationId), config.dream, now)
+                    if (checkpoint != null) require(
+                        narrativeStore.read(assistantId, conversationId, latest.messages).checkpoint == checkpoint
+                    ) { "剧情状态基础版本或覆盖已变化" }
+                    val nextState = if (plan.updateState) planSemanticStateChanges(checkNotNull(checkpoint),
+                        checkNotNull(draft.state), window, latest.messages) else null
+                    val mutations = if (plan.stateOnly) emptyList() else planDreamChanges(assistantId, runId, draft,
+                        window, repository.list(assistantId, conversationId), config.dream, now)
+                    if (checkpoint != null) {
+                        val commitSettings = settingsStore.awaitLoaded()
+                        require(config(assistantId) == config &&
+                            commitSettings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream == stream
+                        ) { "做梦设置或流式模式已变化" }
+                        val commitModel = commitSettings.findModelById(model.id)
+                        require(commitModel == model && commitModel?.findProvider(commitSettings.providers)?.copyProvider() == providerSetting
+                        ) { "做梦模型或端点已变化" }
+                        require(conversationRepo.sourceRevision() == latest.revision) { "来源修订已变化" }
+                        currentCoroutineContext().ensureActive()
+                    }
                     applyMutations(mutations)
-                    changed = mutations.size
-                    val nextCursor = (if (range == null) window.nextCursor else
-                        mergeDreamCoverage(latest.messages, oldCursor, window.evidence)).copy(
-                        continuity = if (range == null) draft.continuity ?: window.nextCursor.continuity else "",
-                        successfulRuns = oldCursor.successfulRuns + 1)
-                    putCursor(assistantId, conversationId, nextCursor)
-                    if (range != null) putCursor(assistantId, conversationId, window.nextCursor.copy(
-                        continuity = draft.continuity ?: window.nextCursor.continuity,
-                        successfulRuns = progressCursor.successfulRuns + 1), range.id)
+                    changed = mutations.size + if (nextState != null) checkNotNull(draft.state).changes.size else 0
+                    if (nextState != null) narrativeStore.put(nextState)
+                    if (!plan.stateOnly) {
+                        val nextCursor = (if (range == null) window.nextCursor else
+                            mergeDreamCoverage(latest.messages, oldCursor, window.evidence)).copy(
+                            continuity = if (range == null) draft.continuity ?: window.nextCursor.continuity else "",
+                            successfulRuns = oldCursor.successfulRuns + 1)
+                        putCursor(assistantId, conversationId, nextCursor)
+                        if (range != null) putCursor(assistantId, conversationId, window.nextCursor.copy(
+                            continuity = draft.continuity ?: window.nextCursor.continuity,
+                            successfulRuns = progressCursor.successfulRuns + 1), range.id)
+                    }
                     val versions = mutations.filter { it.after.status == "active" && it.after.embedding == null }.associate { it.after.id to it.after.contentVersion }
                     if (versions.isNotEmpty()) repository.dao.putJob(SemanticJobEntity("dream_embedding:$runId", assistantId,
                         "dream_embedding", json.encodeToString(DreamEmbeddingTodo(versions,
@@ -368,7 +434,7 @@ class SemanticDreamManager(
                 committed = true
                 committedChanges = changed
             }
-            drainEmbedding(assistantId, conversationId)
+            if (!plan.stateOnly) drainEmbedding(assistantId, conversationId)
             return SemanticDreamRun("completed", 1, changed)
         } catch (cancel: CancellationException) {
             if (!committed) preserveOrCancel(assistantId, state, "已取消，来源游标未推进")
@@ -415,9 +481,7 @@ class SemanticDreamManager(
         val settings = config(assistantId)
         if (settings.embeddingModelId == null) return
         val base = runCatching { repository.fingerprint(settings) }.getOrNull() ?: return
-        repository.dao.jobs(assistantId).filter {
-            it.kind == "dream_embedding" && (conversationId == null || it.conversationId == conversationId)
-        }.forEach { job ->
+        repository.dao.jobsOfKind(assistantId, "dream_embedding", conversationId).forEach { job ->
             val targetConversation = checkNotNull(job.conversationId)
             val todo = json.decodeFromString<DreamEmbeddingTodo>(job.payloadJson)
             val versions = todo.versions.keys.mapNotNull { id -> repository.get(assistantId, targetConversation, id)?.takeIf {
@@ -470,17 +534,8 @@ class SemanticDreamManager(
                 val after = restoreDreamSources(withdrawDreamSources(memory, invalid, System.currentTimeMillis()), restored, System.currentTimeMillis())
                 if (after != memory) repository.dao.put(after)
             }
-            // 替代证据被撤销时，仍有有效旧证据的前一事实恢复；手动状态不在这里覆盖。
-            val current = scopedMemories(assistantId, conversationId).associateBy { it.id }
-            current.values.filter { it.status == "superseded" }.forEach { old ->
-                val successor = dreamMetadata(old)["supersededBy"]?.jsonPrimitive?.contentOrNull?.let(current::get)
-                if (successor?.conversationId == old.conversationId && successor.status == "dormant" &&
-                    dreamMetadata(successor)["sourceWithdrawn"]?.jsonPrimitive?.booleanOrNull == true &&
-                    dreamSources(old).any { it.valid } && (old.isCore || old.expiresAt == null || old.expiresAt > System.currentTimeMillis()))
-                    repository.dao.put(old.copy(status = "active", contentVersion = old.contentVersion + 1,
-                        embeddedVersion = if (old.embeddedVersion == old.contentVersion) old.contentVersion + 1 else old.embeddedVersion,
-                        updatedAt = System.currentTimeMillis()))
-            }
+            planDreamReplacementRecovery(scopedMemories(assistantId, conversationId), System.currentTimeMillis())
+                .forEach { repository.dao.put(it.after) }
         }
     }
 
@@ -524,7 +579,9 @@ class SemanticDreamManager(
     }
 
     private suspend fun autoOrganize(assistantId: String, conversationId: String, config: SemanticMemorySettings) {
-        val successful = runs(assistantId, conversationId).count { it.status == "completed" && it.operation == "reflection" }
+        val successful = runs(assistantId, conversationId).count {
+            it.status == "completed" && it.operation == "reflection" && it.mode != "state_only"
+        }
         if (successful == 0 || successful % config.dream.consolidationEveryRuns != 0) return
         val checkpoint = "dream_organize_checkpoint:$assistantId:$conversationId"
         if (repository.dao.getJob(checkpoint)?.payloadJson == successful.toString()) return

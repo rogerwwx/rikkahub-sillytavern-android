@@ -15,6 +15,11 @@ data class SemanticMemorySettings(
     val coreBudget: Int = 2,
     val dream: SemanticDreamSettings = SemanticDreamSettings(),
     val useAssistantContext: Boolean = true,
+    val sourceExpansionEnabled: Boolean = false,
+    /** 与现有做梦共用提取、调度和事务；启用后另存可校验的剧情状态。 */
+    val narrativeStateEnabled: Boolean = false,
+    /** 后台生成少量有依据的辅助查询，原查询始终保留。 */
+    val queryPlanningEnabled: Boolean = false,
 ) {
     fun normalized() = copy(
         dimensions = dimensions?.coerceIn(1, 65536),

@@ -29,8 +29,8 @@ class SemanticTransferManager(private val repository: SemanticMemoryRepository) 
         return id
     }
 
-    suspend fun jobs(assistantId: String, conversationId: String): List<SemanticImportProgress> = repository.dao.jobs(assistantId)
-        .filter { it.kind == KIND && it.conversationId == conversationId }.map { progress(it) }
+    suspend fun jobs(assistantId: String, conversationId: String): List<SemanticImportProgress> =
+        repository.dao.jobsOfKind(assistantId, KIND, conversationId).map { progress(it) }
 
     suspend fun cancel(assistantId: String, conversationId: String, id: String) = changeStatus(assistantId, conversationId, id, "cancelled")
     suspend fun resume(assistantId: String, conversationId: String, id: String) = changeStatus(assistantId, conversationId, id, "pending")

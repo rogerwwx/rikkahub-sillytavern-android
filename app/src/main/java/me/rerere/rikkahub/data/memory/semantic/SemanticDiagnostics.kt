@@ -35,10 +35,14 @@ fun semanticDiagnostics(events: List<SemanticDiagnosticEvent>): SemanticDiagnost
     val embedding = events.filter { it.operation == "embedding" }
     val recall = events.filter { it.operation == "recall" }
     val details = recall.mapNotNull { runCatching { Json.parseToJsonElement(it.detailJson).jsonObject }.getOrNull() }
-    fun sum(key: String) = details.sumOf { it[key]?.jsonPrimitive?.longOrNull ?: 0 }
+    fun sum(key: String) = details.sumOf { (it[key] as? JsonPrimitive)?.longOrNull ?: 0 }
     val filters = setOf("inactive_or_expired", "invalid_vector", "below_similarity", "changed_during_recall",
         "inactive_status", "expired", "missing_vector", "old_model", "stale_content_version", "content_hash_changed",
-        "dimension_mismatch", "invalid_vector_values").associateWith(::sum)
+        "dimension_mismatch", "invalid_vector_values", "injection_budget", "source_invalid", "source_missing",
+        "source_overlap", "source_visible", "source_budget", "source_expanded", "source_no_anchor",
+        "source_request_stale", "source_request_boundary_missing", "source_request_boundary_changed",
+        "semantic_request_stale", "state_planned", "state_confirmed", "state_entries_planned",
+        "state_entries_confirmed", "state_request_gap", "state_request_stale", "state_budget_skipped").associateWith(::sum)
     return SemanticDiagnostics(counts(embedding), counts(recall), embedding.groupBy { it.purpose }.mapValues { counts(it.value) },
         events.count { it.operation == "storage" && it.status == "success" },
         events.count { it.operation == "storage" && it.status == "conflict" },
@@ -46,6 +50,63 @@ fun semanticDiagnostics(events: List<SemanticDiagnosticEvent>): SemanticDiagnost
         sum("recalled"), sum("injected"), sum("lexicalCandidates"), sum("vectorCandidates"), sum("deduplicatedCandidates"),
         filters, details.count { it["degraded"]?.jsonPrimitive?.contentOrNull?.isNotEmpty() == true },
         events.filter { it.error != null }.sortedByDescending { it.startedAt }.take(10))
+}
+
+/**
+ * 展示该召回事件最近一次组装的请求；工具续轮、重试共用 eventId，审计覆盖更新而非累计网络注入次数。
+ * 逐字确认只说明最终文本存在；近义文本经过转换后未匹配，不能断定未发送。缺字段显示未知。
+ */
+fun semanticInjectionSummary(event: SemanticDiagnosticEvent): List<String> {
+    val detail = runCatching { Json.parseToJsonElement(event.detailJson) as? JsonObject }.getOrNull()
+    fun idCount(key: String): Int? {
+        val ids = detail?.get(key) as? JsonArray ?: return null
+        return ids.size.takeIf {
+            ids.all { id -> id is JsonPrimitive && id.isString && id.content.isNotBlank() }
+        }
+    }
+    fun count(key: String): Long? =
+        (detail?.get(key) as? JsonPrimitive)?.longOrNull?.takeIf { it >= 0 }
+    fun amount(value: Number?, unit: String) = value?.let { "$it $unit" } ?: "未知"
+    fun sourceSkipped(key: String) = count(key)?.toString() ?: "未知"
+    val requestCounts = listOf("source_request_stale", "source_request_boundary_missing",
+        "source_request_boundary_changed", "semantic_request_stale").map(::count)
+    return listOf(
+        "记忆：选中 ${amount(idCount("selectedIds"), "条")} → " +
+            "预算接受 ${amount(idCount("budgetAcceptedIds"), "条")} → " +
+            "逐字确认存在 ${amount(idCount("confirmedInjectedIds"), "条")}",
+        "来源：展开 ${amount(count("sourceExpanded"), "片")} → " +
+            "逐字确认存在 ${amount(count("sourceConfirmed"), "片")}",
+        "预算跳过：摘要 ${amount(count("injection_budget"), "条")} · " +
+            "来源 ${amount(count("source_budget"), "片")}",
+        "转换或缺失：${amount(count("injectionTransformedOrMissing"), "项")}",
+        "注入估算：${amount(count("injectionEstimatedTokens"), "token")}",
+        "来源跳过：无效 ${sourceSkipped("source_invalid")} · 缺失 ${sourceSkipped("source_missing")} · " +
+            "重叠 ${sourceSkipped("source_overlap")} · 已可见 ${sourceSkipped("source_visible")} · " +
+            "未定位 ${sourceSkipped("source_no_anchor")}",
+    ) + listOfNotNull(
+        if (requestCounts.any { it != null }) {
+            "请求校验：来源过时 ${sourceSkipped("source_request_stale")} · " +
+                "记忆/设置过时 ${sourceSkipped("semantic_request_stale")} · " +
+                "无有效边界 ${sourceSkipped("source_request_boundary_missing")} · " +
+                "边界已变 ${sourceSkipped("source_request_boundary_changed")}"
+        } else null,
+        if ((count("source_request_stale") ?: 0) > 0) "来源过时：已回退摘要。" else null,
+        if ((count("semantic_request_stale") ?: 0) > 0) "记忆/设置过时：已撤下全部记忆块。" else null,
+        if (count("state_entries_planned") != null || count("state_entries_confirmed") != null) {
+            "状态：预算接受 ${amount(count("state_entries_planned"), "格")} → " +
+                "逐字确认存在 ${amount(count("state_entries_confirmed"), "格")}"
+        } else null,
+        if (count("state_covered_count") != null) {
+            "状态覆盖前 ${count("state_covered_count")} 条原文 · " +
+                "状态估算 ${amount(count("state_estimated_tokens"), "token")}"
+        } else null,
+        if ((count("state_request_gap") ?: 0) > 0) "状态覆盖或正文可见性不足：本次已撤下状态块。" else null,
+        if ((count("state_request_stale") ?: 0) > 0) "状态或规划依据已变化：本次已回退普通召回。" else null,
+        if (count("plannedQueryCount") != null) {
+            "查询规划：扩展查询 ${amount(count("plannedQueryCount"), "条")} · " +
+                "新增候选 ${amount(idCount("plannedCandidateIds"), "条")}"
+        } else null,
+    )
 }
 
 /** 原始 bm25 可能是 -1e-6 量级：保留 6 位有效数字，绝不用 3 位小数把它显示成 0。 */

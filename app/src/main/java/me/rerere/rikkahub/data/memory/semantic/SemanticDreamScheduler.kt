@@ -108,8 +108,8 @@ class SemanticDreamScheduler(
         Json.decodeFromString<SemanticDreamScheduleState>(it.payloadJson)
     }
 
-    private suspend fun states(assistantId: String): List<SemanticDreamScheduleState> = repository.dao.jobs(assistantId)
-        .filter { it.kind == KIND }.map { Json.decodeFromString<SemanticDreamScheduleState>(it.payloadJson) }
+    private suspend fun states(assistantId: String): List<SemanticDreamScheduleState> =
+        repository.dao.jobsOfKind(assistantId, KIND).map { Json.decodeFromString<SemanticDreamScheduleState>(it.payloadJson) }
 
     /** 设置观察可能稍晚到达，只撤销旧配置的任务，保留保存设置后新建的队列。 */
     private suspend fun invalidateConfiguration(assistantId: String) = repository.database.withTransaction {

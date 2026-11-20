@@ -11,12 +11,15 @@ internal data class SemanticRecallInput(
     val retrievalQuery: String,
     val recentContext: String,
     val previousAssistantMessage: String? = null,
+    val historySummary: String = "",
 ) {
-    fun cacheKey(revision: String, jevRevision: String, useAssistantContext: Boolean = true): String {
+    fun cacheKey(revision: String, jevRevision: String, useAssistantContext: Boolean = true,
+        queryPlanningEnabled: Boolean = false, plannerRevision: String = "", stateRevision: String = ""): String {
         val queries = semanticRecallQueries(retrievalQuery, previousAssistantMessage, useAssistantContext)
-        return semanticContentHash(listOf(revision, jevRevision, currentUserMessage, retrievalQuery, recentContext,
+        val baseline = listOf(revision, jevRevision, currentUserMessage, retrievalQuery, recentContext,
             useAssistantContext.toString(), queries.assistantStrategy, *queries.vectorInputs.toTypedArray())
-            .joinToString("") { "${it.length}:$it" })
+        val parts = if (queryPlanningEnabled) baseline + listOf(historySummary, plannerRevision, stateRevision) else baseline
+        return semanticContentHash(parts.joinToString("") { "${it.length}:$it" })
     }
 }
 /**
@@ -24,15 +27,17 @@ internal data class SemanticRecallInput(
  * 在工具循环前调用一次，工具结果和本轮助手草稿不改变召回查询。
  */
 internal fun buildSemanticRecallInput(messages: List<UIMessage>, contextMessageLimit: Int): SemanticRecallInput {
-    val visible = messages.filterNot { it.isContextHidden }.limitContext(contextMessageLimit)
-        .filterNot { it.isContextCheckpoint || it.isSynthetic }
+    val selected = messages.filterNot { it.isContextHidden }.limitContext(contextMessageLimit)
+    val summary = selected.lastOrNull { it.isContextCheckpoint && !it.isSynthetic }?.toText()
+        ?.let { semanticContextExcerpt(it, 4000) }.orEmpty()
+    val visible = selected.filterNot { it.isContextCheckpoint || it.isSynthetic }
     val currentIndex = visible.indexOfLast { it.role == MessageRole.USER }
     if (currentIndex < 0) {
         // 续写裁剪后可能只剩助手预填；使用这个可见场景，不补回已不可见的用户正文。
         val tail = visible.lastOrNull { it.role == MessageRole.ASSISTANT }
             ?.takeIf { it.toText().isNotBlank() && isSemanticSceneComplete(it) }
         val context = semanticTurnText(listOfNotNull(tail), 1200)
-        return SemanticRecallInput("", context, context)
+        return SemanticRecallInput("", context, context, historySummary = summary)
     }
     val current = visible[currentIndex].toText()
     // 续写、代写及安静生成可能以已有助手回复/预填结尾，它已属于冻结输入中的最新场景。
@@ -58,7 +63,7 @@ internal fun buildSemanticRecallInput(messages: List<UIMessage>, contextMessageL
     val previousAssistant = if (!hasAssistantTail && replies.isNotEmpty() && replies.all(::isSemanticSceneComplete)) {
         replies.last().toText().takeIf { it.isNotBlank() }
     } else null
-    return SemanticRecallInput(current, query, context, previousAssistant)
+    return SemanticRecallInput(current, query, context, previousAssistant, summary)
 }
 
 private fun isSemanticSceneComplete(message: UIMessage): Boolean =

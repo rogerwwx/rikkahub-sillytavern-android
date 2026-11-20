@@ -197,6 +197,9 @@ fun SemanticMemoryPage(id: String, conversationId: String) {
                 2 -> SemanticDiagnosticsPanel(vm, all.size, busy)
                 3 -> SemanticDreamPanel(vm, dreamHistory, busy,
                     enabled = assistant?.semanticMemory?.enabled == true,
+                    narrativeEnabled = assistant?.semanticMemory?.narrativeStateEnabled == true,
+                    automatic = assistant?.semanticMemory?.dream?.automatic == true,
+                    onLocateStateSource = { nodeId -> nav.navigate(Screen.Chat(conversationId, nodeId = nodeId)) },
                     openSettings = { nav.navigate(Screen.SemanticDreamSettings(id)) })
             }
         }
@@ -651,10 +654,15 @@ private fun SemanticDreamPanel(
     history: SemanticDreamHistory?,
     busy: Boolean,
     enabled: Boolean,
+    narrativeEnabled: Boolean,
+    automatic: Boolean,
+    onLocateStateSource: (String) -> Unit,
     openSettings: () -> Unit,
 ) {
     val schedule by vm.dreamSchedule.collectAsStateWithLifecycle()
     val runs by vm.dreamRuns.collectAsStateWithLifecycle()
+    val narrativeState by vm.narrativeState.collectAsStateWithLifecycle()
+    val narrativeError by vm.narrativeStateError.collectAsStateWithLifecycle()
     var mode by rememberSaveable(vm.assistantId, vm.conversationId) { mutableIntStateOf(0) }
     var startFloor by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf("1") }
     var endFloor by rememberSaveable(vm.assistantId, vm.conversationId) { mutableStateOf("") }
@@ -768,6 +776,10 @@ private fun SemanticDreamPanel(
                 }
             }
         }
+        SemanticNarrativeStatePanel(view = narrativeState, error = narrativeError,
+            enabled = narrativeEnabled, automatic = automatic, canUpdate = enabled && !busy,
+            onUpdate = { vm.dream() }, onSources = { vm.inspectStateSources(it) },
+            onLocate = onLocateStateSource)
         CardGroup(modifier = Modifier.fillMaxWidth(), title = { Text("设置") }) {
             item(
                 onClick = openSettings,
@@ -836,6 +848,14 @@ private fun SemanticSettingsPanel(
                 }
                 Switch(checked = config.enabled, onCheckedChange = { configure { old -> old.copy(enabled = it) } })
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("随做梦维护剧情状态", Modifier.weight(1f))
+                Switch(checked = config.narrativeStateEnabled,
+                    onCheckedChange = { enabled -> configure { it.copy(narrativeStateEnabled = enabled) } })
+            }
+            Text("默认关闭；人物、关系、物品、约定和场景状态随做梦更新。" +
+                "自动做梦未开启时，在「做梦」页手动点更新；首次补旧库状态不会重复生成旧回忆。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         SemanticMemorySection("Embedding 模型", HugeIcons.AiMagic) {
             ModelSelector(modelId = config.embeddingModelId, providers = providers, type = ModelType.EMBEDDING,
@@ -862,6 +882,22 @@ private fun SemanticSettingsPanel(
                     onCheckedChange = { enabled -> configure { it.copy(useAssistantContext = enabled) } })
             }
             Text("默认开启；有完整上文且未明确换题时，额外生成一个 Embedding 查询向量，会增加用量。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("辅助查询规划", Modifier.weight(1f))
+                Switch(checked = config.queryPlanningEnabled,
+                    onCheckedChange = { enabled -> configure { it.copy(queryPlanningEnabled = enabled) } })
+            }
+            Text("默认关闭；开启后每轮最多多一次做梦模型的辅助调用，生成最多两条查找线索。" +
+                "可能增加等待和模型、向量检索用量；规划失败时沿用普通召回。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("回忆原文补充", Modifier.weight(1f))
+                Switch(checked = config.sourceExpansionEnabled,
+                    onCheckedChange = { enabled -> configure { it.copy(sourceExpansionEnabled = enabled) } })
+            }
+            Text("默认关闭；只在来源原文有效时，用摘要后的剩余预算补充最多两片原文，" +
+                "补充不超过总预算的 40%，不增加模型调用。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             SemanticIntSlider("最多召回条数 · TopK", config.topK, 1..50) { value ->
                 configure { it.copy(topK = value, coreBudget = it.coreBudget.coerceAtMost(value)) }
@@ -976,7 +1012,8 @@ private fun SemanticSettingsPanel(
         CardGroup(modifier = Modifier.fillMaxWidth(), title = { Text("数据管理") }) {
             item(
                 headlineContent = { Text("导出全部记忆") },
-                supportingContent = { Text("当前窗口 " + memoryCount + " 条记忆的内容与元数据，不含向量缓存") },
+                supportingContent = { Text("当前窗口 " + memoryCount +
+                    " 条记忆的 JSON 内容与元数据，不含向量缓存和状态检查点；状态随完整数据库备份保留") },
                 leadingContent = { CardGroupIcon(HugeIcons.Download04) },
                 trailingContent = {
                     OutlinedButton(enabled = !busy && memoryCount > 0, onClick = onExportAll) { Text("导出") }
@@ -992,7 +1029,8 @@ private fun SemanticSettingsPanel(
             )
             if (selectedCount > 0) item(
                 headlineContent = { Text("导出所选") },
-                supportingContent = { Text("仅导出管理页已选中的 " + selectedCount + " 条") },
+                supportingContent = { Text("仅导出管理页已选中的 " + selectedCount +
+                    " 条记忆，不含状态检查点；状态随完整数据库备份保留") },
                 leadingContent = { CardGroupIcon(HugeIcons.Download04) },
                 trailingContent = {
                     OutlinedButton(enabled = !busy, onClick = onExportSelected) { Text("导出") }
@@ -1072,6 +1110,8 @@ private fun SemanticMemoryEditor(memory: SemanticMemoryEntity, onDismiss: () -> 
 
 private fun SemanticDreamRunState.title(): String = when {
     operation == "organize" -> if (trigger == "auto") "记忆整理（自动）" else "记忆整理（手动）"
+    mode == "state_only" -> if (trigger in setOf("manual", "range")) "状态回填（手动）" else "状态回填（自动）"
+    mode == "joint" -> "回忆与状态整理"
     trigger == "range" -> "历史反思（指定范围）"
     trigger == "manual" -> "历史反思（手动）"
     else -> "历史反思（自动）"
@@ -1095,6 +1135,12 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
     val recallQuery by vm.recallQuery.collectAsStateWithLifecycle()
     val recallPreviousAssistant by vm.recallPreviousAssistant.collectAsStateWithLifecycle()
     val recallResult by vm.recallResult.collectAsStateWithLifecycle()
+    val recallPlan by vm.recallPlan.collectAsStateWithLifecycle()
+    val recallQueryPlan by vm.recallQueryPlan.collectAsStateWithLifecycle()
+    val recallPlannedCandidates by vm.recallPlannedCandidates.collectAsStateWithLifecycle()
+    val recallStatePreview by vm.recallStatePreview.collectAsStateWithLifecycle()
+    val recallPreviewEstimatedTokens by vm.recallPreviewEstimatedTokens.collectAsStateWithLifecycle()
+    val recallStateNotice by vm.recallStateNotice.collectAsStateWithLifecycle()
     var whole by rememberSaveable { mutableStateOf(false) }
     val events = if (whole) allEvents else assistantEvents
     val report = remember(events) { semanticDiagnostics(events) }
@@ -1120,7 +1166,7 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                         OutlinedTextField(
                             value = recallQuery,
                             onValueChange = { vm.recallQuery.value = it },
-                            placeholder = { Text("输入一句话测试真实召回") },
+                            placeholder = { Text("输入一句话预览召回") },
                             leadingIcon = { Icon(HugeIcons.Search01, null, Modifier.size(18.dp)) },
                             minLines = 2,
                             maxLines = 5,
@@ -1143,6 +1189,16 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                             }
                             Text("只检索本窗口", style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.outline)
+                        }
+                        Text("规划开启后，本次测试也可能多一次辅助调用；失败沿用普通召回。",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        recallQueryPlan?.let { plan ->
+                            Text("查询规划：${semanticQueryPlanningStatusLabel(plan.status)} · " +
+                                "辅助查询 ${plan.queries.size} 条 · 新增候选 $recallPlannedCandidates 条",
+                                style = MaterialTheme.typography.labelMedium)
+                            plan.queries.forEachIndexed { index, text ->
+                                Text("辅助查询 ${index + 1}：$text", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                         recallResult?.let { result ->
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
@@ -1195,6 +1251,47 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                                 }
                             }
                         }
+                        recallPlan?.let { plan ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                            Text("预算预览：接受 ${plan.result.hits.size} 条摘要 · " +
+                                "来源 ${plan.excerpts.size} 片 · 估算 ${plan.estimatedTokens} token",
+                                style = MaterialTheme.typography.labelMedium)
+                            Text("这是测试输入的预览，不代表某轮真实发送。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("未提供真实发送的可见消息列表，未进行状态尾部或回忆来源的可见原文去重。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            recallStateNotice?.let { notice ->
+                                Text(notice, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            recallStatePreview?.let { state ->
+                                Text("状态预算：${state.entryIds.size} 格 · 跳过 ${state.skipped} 格 · " +
+                                    "估算 ${state.estimatedTokens} token；状态与回忆合计 " +
+                                    "$recallPreviewEstimatedTokens token",
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text("预算跳过：摘要 ${plan.filters["injection_budget"] ?: 0} 条 · " +
+                                "来源 ${plan.filters["source_budget"] ?: 0} 片",
+                                style = MaterialTheme.typography.labelSmall)
+                            Text("来源跳过：无效 ${plan.filters["source_invalid"] ?: 0} · " +
+                                "缺失 ${plan.filters["source_missing"] ?: 0} · " +
+                                "重叠 ${plan.filters["source_overlap"] ?: 0} · " +
+                                "已可见 ${plan.filters["source_visible"] ?: 0} · " +
+                                "未定位 ${plan.filters["source_no_anchor"] ?: 0}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            var expanded by remember(plan) { mutableStateOf(false) }
+                            TextButton(onClick = { expanded = !expanded }) {
+                                Text(if (expanded) "收起注入提示词预览" else "查看注入提示词预览")
+                            }
+                            if (expanded) {
+                                Text((recallStatePreview?.prompt.orEmpty() + plan.prompt)
+                                    .ifEmpty { "本次没有可注入的记忆或状态。" },
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                     }
                 }
             }
@@ -1227,6 +1324,18 @@ private fun SemanticDiagnosticsPanel(vm: SemanticMemoryVM, windowTotal: Int, bus
                         StatRow("召回次数", report.recall.total.toString())
                         StatRow("上次召回命中", lastRecall?.let { semanticRecallScoreLines(it).size.toString() + " 条" } ?: "暂无")
                         StatRow("上次召回", lastRecall?.let { relativeTime(it.startedAt) } ?: "暂无")
+                        lastRecall?.let { event ->
+                            Text("该召回事件最近一次组装的请求（续轮、重试覆盖更新）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                            semanticInjectionSummary(event).forEach { line ->
+                                Text(line, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text("逐字确认只说明组装后的文本存在；未匹配也可能是文本转换，不能据此断定未发送。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline)
+                        }
                         StatRow("降级次数", report.degraded.toString())
                         StatRow("过滤（阈值 / 无效向量）", belowSimilarity.toString() + " / " + invalidVector)
                         recentError?.let {

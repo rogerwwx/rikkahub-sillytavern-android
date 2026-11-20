@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.memory.semantic
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import java.security.MessageDigest
 
 data class DreamMessage(
@@ -100,7 +101,10 @@ data class SemanticDreamChange(
 )
 
 @Serializable
-data class SemanticDreamDraft(val changes: List<SemanticDreamChange>, val continuity: String? = null)
+data class SemanticDreamDraft(
+    val changes: List<SemanticDreamChange>, val continuity: String? = null,
+    val state: SemanticStateDraft? = null,
+)
 
 private val dreamJson = Json { ignoreUnknownKeys = false }
 
@@ -111,9 +115,22 @@ fun cleanDreamJson(text: String): String {
     return cleaned
 }
 
-fun parseDreamDraft(text: String): SemanticDreamDraft {
+fun parseDreamDraft(
+    text: String, baseRevision: String? = null, stateOnly: Boolean = false,
+    allowState: Boolean = baseRevision != null,
+): SemanticDreamDraft {
     val cleaned = cleanDreamJson(text)
+    if (!allowState) require((dreamJson.parseToJsonElement(cleaned) as? JsonObject)?.containsKey("state") != true) {
+        "当前反思未启用剧情状态"
+    }
     return dreamJson.decodeFromString<SemanticDreamDraft>(cleaned).also { draft ->
+        require(allowState || draft.state == null) { "当前反思未启用剧情状态" }
+        if (baseRevision != null) {
+            require(draft.state != null) { "模型未返回必需的剧情状态" }
+            require(draft.state.baseRevision == baseRevision) { "剧情状态基础版本不匹配" }
+        }
+        require(!stateOnly || draft.changes.isEmpty()) { "状态回填的 changes 必须为空，不能重复生成旧回忆" }
+        require(!stateOnly || draft.continuity == null) { "状态回填不能更新记忆衔接状态" }
         require(draft.continuity == null || draft.continuity.length <= 2000) { "衔接状态过长" }
         draft.changes.forEach { change ->
             require(change.operation in setOf("add", "reinforce", "replace")) { "未知记忆操作" }

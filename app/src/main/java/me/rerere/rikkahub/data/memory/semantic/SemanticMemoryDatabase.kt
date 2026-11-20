@@ -154,7 +154,7 @@ interface SemanticMemoryDAO {
     suspend fun jobHeader(id: String): SemanticJobHeader?
 
     @Query("""SELECT id, assistantId, conversationId, kind, updatedAt, length(payloadJson) AS payloadLength,
-        CASE WHEN length(payloadJson) <= 16384 THEN payloadJson ELSE NULL END AS inlinePayload
+        CASE WHEN kind != 'narrative_state' AND length(payloadJson) <= 16384 THEN payloadJson ELSE NULL END AS inlinePayload
         FROM semantic_job WHERE assistantId = :assistantId ORDER BY updatedAt DESC""")
     suspend fun jobHeaders(assistantId: String): List<SemanticJobHeader>
 
@@ -167,6 +167,13 @@ interface SemanticMemoryDAO {
 
     @Transaction
     suspend fun jobs(assistantId: String): List<SemanticJobEntity> = jobHeaders(assistantId).map { materializeJob(it) }
+
+    /** 先按任务类型筛选，避免查看维护进度时物化历史剧情状态等大型载荷。 */
+    @Transaction
+    suspend fun jobsOfKind(assistantId: String, kind: String, conversationId: String? = null): List<SemanticJobEntity> =
+        jobHeaders(assistantId).filter {
+            it.kind == kind && (conversationId == null || it.conversationId == conversationId)
+        }.map { materializeJob(it) }
 
     private suspend fun materializeJob(header: SemanticJobHeader): SemanticJobEntity = SemanticJobEntity(
         header.id, header.assistantId, header.kind,

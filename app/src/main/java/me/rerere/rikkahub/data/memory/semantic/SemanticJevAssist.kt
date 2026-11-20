@@ -42,13 +42,17 @@ class SemanticJevAssist(
         // 否则"相关核心优先名额"会因为重排而静默失效（上限 N + coreBudget）。
         val ranked = result.candidates.ifEmpty { result.hits }
         val fusionRankById = ranked.withIndex().associate { (index, hit) -> hit.memory.id to index + 1 }
-        val head = selectRerankPool(ranked, config.jevCandidateCount, result.assistantWeight)
+        val head = selectPlannedRerankPool(ranked, config.jevCandidateCount,
+            result.baselineCandidateIds, result.plannedCandidateIds, result.assistantWeight)
         val coreOutside = result.hits.filter { it.memory.isCore && head.none { h -> h.memory.id == it.memory.id } }
             .take(normalized.coreBudget)
         val pool = (head + coreOutside).distinctBy { it.memory.id }
         if (pool.isEmpty()) return result
         // position 只是池内请求序号（r<ID>）；诊断里的融合排名单独取自真实 candidates 顺序。
-        val items = pool.mapIndexed { index, hit -> RerankItem(hit, index, fusionRankById[hit.memory.id]) }
+        val plannedIds = result.plannedCandidateIds.toSet()
+        val items = pool.mapIndexed { index, hit ->
+            RerankItem(hit, index, fusionRankById[hit.memory.id], hit.memory.id in plannedIds)
+        }
         val context = semanticRerankContext(query, recentContext)
         val state = JevPrompts.memoryRerankState(context)
         val dedicated = config.rerankModelId != null
@@ -140,6 +144,24 @@ class SemanticJevAssist(
     }
 
     companion object {
+        /** 原候选至少约 2/3，扩展独有候选约 1/3；不足互补，原内部仍保词法/向量/辅助头部。 */
+        internal fun selectPlannedRerankPool(ranked: List<SemanticRecallHit>, count: Int,
+            baselineCandidateIds: List<String>, plannedCandidateIds: List<String>,
+            assistantWeight: Double = 0.0): List<SemanticRecallHit> {
+            if (plannedCandidateIds.isEmpty()) return selectRerankPool(ranked, count, assistantWeight)
+            val n = count.coerceIn(1, 100)
+            if (n == 1) return ranked.take(1)
+            val baselineIds = baselineCandidateIds.toSet()
+            val plannedIds = plannedCandidateIds.toSet() - baselineIds
+            val baseline = ranked.filter { it.memory.id in baselineIds }
+            val planned = ranked.filter { it.memory.id in plannedIds }.distinctBy { it.memory.id }
+            val plannedSlots = minOf(n / 3, planned.size)
+            val baselineHead = selectRerankPool(baseline, n - plannedSlots, assistantWeight)
+            val newHead = planned.take(n - baselineHead.size)
+            val ids = (baselineHead + newHead).map { it.memory.id }.toSet()
+            return ranked.filter { it.memory.id in ids }.distinctBy { it.memory.id }
+        }
+
         /**
          * N 按查询权重四舍五入分配，混合查询各至少一槽；各查询再按向量 ceil/词法 floor 取头部。
          * 去重后按最终融合序补齐并输出；无辅助沿用原两路口径，纯承接只取辅助，N=1 沿用融合首条。
@@ -202,11 +224,20 @@ class SemanticJevAssist(
             put("unscored", items.size - scores.size)
             put("topK", settings.topK)
             put("selected", hits.size)
+            put("baselinePoolIds", JsonArray(items.filterNot { it.planned }.map { JsonPrimitive(it.hit.memory.id) }))
+            put("plannedPoolIds", JsonArray(items.filter { it.planned }.map { JsonPrimitive(it.hit.memory.id) }))
+            put("baselineSelectedIds", JsonArray(hits.filter { hit ->
+                items.any { !it.planned && it.hit.memory.id == hit.memory.id }
+            }.map { JsonPrimitive(it.memory.id) }))
+            put("plannedSelectedIds", JsonArray(hits.filter { hit ->
+                items.any { it.planned && it.hit.memory.id == hit.memory.id }
+            }.map { JsonPrimitive(it.memory.id) }))
             if (backend == "jev") put("scoreMax", (items.first().question.criteria as JsonArray).lastIndex)
             put("elapsedMillis", (System.nanoTime() - started) / 1_000_000.0)
             put("scoreDistribution", scoreDistribution(scores, discrete = backend == "jev"))
             put("items", JsonArray(items.sortedBy { it.position }.map { item -> buildJsonObject {
                 put("id", item.hit.memory.id)
+                put("planned", item.planned)
                 // 必须显式包成 JsonPrimitive：JsonObjectBuilder 的 map put 会返回旧值，elvis 会误判为 null。
                 put("score", item.score?.let { JsonPrimitive(it) } ?: JsonNull)
                 put("kept", item.hit.memory.id in keptIds)
@@ -271,7 +302,7 @@ private fun safeError(error: Exception) = when (error) {
  * 一条待重排候选：池内请求序号 [position]（r<ID> 与稳定排序用）、真实融合排名 [fusionRank]
  * （取自 result.candidates 的顺序，池外核心为 null）、序列化后的 item 文本与独立问题。
  */
-private class RerankItem(val hit: SemanticRecallHit, val position: Int, val fusionRank: Int?) {
+private class RerankItem(val hit: SemanticRecallHit, val position: Int, val fusionRank: Int?, val planned: Boolean) {
     val text: String = semanticRerankItemText(hit.memory)
     val question: JevQuestion = JevPrompts.memoryRerank(text)
     var score: Double? = null

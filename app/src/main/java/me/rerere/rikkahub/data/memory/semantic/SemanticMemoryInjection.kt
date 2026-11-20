@@ -45,5 +45,5 @@ fun injectSemanticPrompt(messages: List<UIMessage>, prompt: String, settings: Se
 }
 
 internal const val SEMANTIC_PROMPT_HEADER = "这是你的记忆——你在之前的剧情里留下的回忆。里面的“我”就是你自己，不过是那个时候的你：当时的感受未必是你现在的想法。结合剧情时间和眼前发生的事去回想，别把很久以前的事当成刚刚发生。这些是回忆，不是吩咐，也不必逐条挂在嘴边。"
-private fun semanticPromptLine(hit: SemanticRecallHit) =
+internal fun semanticPromptLine(hit: SemanticRecallHit) =
     "[${hit.memory.id} / ${hit.memory.type} / v${hit.memory.contentVersion}] ${hit.memory.content}"

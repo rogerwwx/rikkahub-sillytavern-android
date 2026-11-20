@@ -21,7 +21,7 @@ class SemanticMaintenanceManager(private val repository: SemanticMemoryRepositor
         val job = SemanticMaintenanceJob(UUID.randomUUID().toString(), assistantId, conversationId, base,
             entries.map { SemanticMaintenanceItem(it.id, it.contentVersion, it.contentHash, indexedAtBefore = it.indexedAt) })
         repository.database.withTransaction {
-            check(repository.dao.jobs(assistantId).filter { it.kind == KIND && it.conversationId == conversationId }.none {
+            check(repository.dao.jobsOfKind(assistantId, KIND, conversationId).none {
                 decode(it).status in setOf("pending", "running")
             }) { "当前窗口已有运行中的重建任务，请先取消或等待完成" }
             repository.dao.putJob(SemanticJobEntity(job.id, assistantId, KIND,
@@ -34,16 +34,14 @@ class SemanticMaintenanceManager(private val repository: SemanticMemoryRepositor
         return job
     }
 
-    suspend fun jobs(assistantId: String, conversationId: String) = repository.dao.jobs(assistantId)
-        .filter { it.kind == KIND && it.conversationId == conversationId }.map(::decode)
+    suspend fun jobs(assistantId: String, conversationId: String) = repository.dao.jobsOfKind(assistantId, KIND, conversationId)
+        .map(::decode)
 
     suspend fun resume(assistantId: String, conversationId: String, id: String, retryFailures: Boolean = false): SemanticMaintenanceJob = repository.database.withTransaction {
         val entity = repository.dao.getJob(id) ?: error("维护任务不存在")
         check(entity.assistantId == assistantId && entity.conversationId == conversationId) { "维护任务不属于当前窗口" }
         val job = decode(entity)
-        check(repository.dao.jobs(job.assistantId).filter {
-            it.kind == KIND && it.id != id && it.conversationId == conversationId
-        }.none {
+        check(repository.dao.jobsOfKind(job.assistantId, KIND, conversationId).filter { it.id != id }.none {
             decode(it).status in setOf("pending", "running")
         }) { "当前窗口已有其他运行中的重建任务" }
         val resumed = if (retryFailures) job.retryFailures() else job.resume()
