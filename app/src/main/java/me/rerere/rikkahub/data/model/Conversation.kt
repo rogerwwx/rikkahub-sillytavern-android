@@ -206,7 +206,7 @@ internal fun Conversation.replacePrefixWithSummaries(
 ): Conversation? {
     val index = messageNodes.indexOfFirst { it.id == throughNodeId }
     if (index == -1) return null
-    val summaryNodes = summaries.map { UIMessage.user(it).copy(isContextCheckpoint = true).toMessageNode() }
+    val summaryNodes = summaries.map { UIMessage.system(it).copy(isContextCheckpoint = true).toMessageNode() }
     return copy(messageNodes = summaryNodes + messageNodes.subList(index + 1, messageNodes.size))
 }
 
@@ -230,7 +230,7 @@ internal fun Conversation.hidePrefixWithSummaries(
             },
         )
     }
-    val summaryNodes = summaries.map { UIMessage.user(it).copy(isContextCheckpoint = true).toMessageNode() }
+    val summaryNodes = summaries.map { UIMessage.system(it).copy(isContextCheckpoint = true).toMessageNode() }
     return copy(messageNodes = hiddenPrefix + summaryNodes + messageNodes.drop(index + 1))
 }
 

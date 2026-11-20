@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.model
 
 import me.rerere.ai.ui.ToolApprovalState
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.finishPendingTools
@@ -32,7 +33,7 @@ internal fun Conversation.editMessage(messageId: Uuid, parts: List<UIMessagePart
     val original = node.messages.first { it.id == messageId }
     val edited = if (original.isContextCheckpoint) {
         // 摘要原地改写：新建分支会丢掉检查点标记，删除摘要时还会露出旧版本。
-        original.copy(parts = parts)
+        original.copy(role = MessageRole.SYSTEM, parts = parts)
     } else {
         UIMessage(
             role = node.role,

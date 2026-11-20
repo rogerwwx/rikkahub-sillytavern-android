@@ -1850,7 +1850,42 @@
     return head;
   }
 
+  function renderSummaryRow(msg) {
+    var row = document.createElement('div');
+    row.className = 'row context-summary';
+    row.dataset.id = String(msg.id);
+    row.dataset.role = 'system';
+    var details = document.createElement('details');
+    var title = document.createElement('summary');
+    title.textContent = '上下文摘要';
+    details.appendChild(title);
+    var label = document.createElement('div');
+    label.className = 'summary-label';
+    label.textContent = msg.isContextHidden ? '历史摘要 · 已被新摘要覆盖' : '系统消息';
+    details.appendChild(label);
+    var text = document.createElement('div');
+    text.className = 'summary-text';
+    text.textContent = String(msg.text || '');
+    details.appendChild(text);
+    row.appendChild(details);
+    var ops = document.createElement('div');
+    ops.className = 'summary-ops';
+    [['edit', '编辑'], ['menu', '更多']].forEach(function (def) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = def[1];
+      button.addEventListener('click', function () {
+        requestNative('messageAction', JSON.stringify({ action: def[0], id: String(msg.id) }));
+      });
+      ops.appendChild(button);
+    });
+    row.appendChild(ops);
+    row.dataset.signature = signatureOf(msg);
+    return row;
+  }
+
   function renderRow(msg, streaming) {
+    if (msg.isContextCheckpoint) return renderSummaryRow(msg);
     var row = document.createElement('div');
     row.className = 'row enter ' + (msg.role === 'user' ? 'user' : 'ai');
     row.dataset.id = String(msg.id);
@@ -1890,6 +1925,14 @@
 
   // 就地更新一行（正文、头部、统计、操作排）
   function updateRow(row, msg, streaming) {
+    if (msg.isContextCheckpoint) {
+      var summaryText = row.querySelector('.summary-text');
+      var summaryLabel = row.querySelector('.summary-label');
+      if (summaryText) summaryText.textContent = String(msg.text || '');
+      if (summaryLabel) summaryLabel.textContent = msg.isContextHidden ? '历史摘要 · 已被新摘要覆盖' : '系统消息';
+      row.dataset.signature = signatureOf(msg);
+      return;
+    }
     var body = row.querySelector('.body');
     if (body) patchBody(body, msg, streaming);
 

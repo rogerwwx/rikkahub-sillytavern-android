@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.model
 
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
 import org.junit.Test
 import kotlin.uuid.Uuid
@@ -21,6 +22,7 @@ class ConversationCompressionBoundaryTest {
         check(compressed.messageNodes.drop(41) == originals.drop(40))
         check(compressed.currentMessages.size == 33)
         check(compressed.currentMessages.first().isContextCheckpoint)
+        check(compressed.currentMessages.first().role == MessageRole.SYSTEM)
         check(compressed.currentMessages.drop(1) == originals.drop(40).map { it.currentMessage })
         check(compressed.currentMessages.none { it.isContextHidden })
         check(compressed.messagesBeforeNode(compressed.messageNodes.last().id).size == 32)

@@ -99,6 +99,21 @@ class GoogleRequestMessageTest {
     }
 
     @Test
+    fun `system summary remains in text and image conversation requests`() {
+        val summary = UIMessage.system("compressed history").copy(isContextCheckpoint = true)
+        for (imageOutput in listOf(false, true)) {
+            val result = invokeBuildContents(
+                listOf(UIMessage.system("main prompt"), summary, UIMessage.user("continue")),
+                imageOutput = imageOutput,
+            )
+            val texts = result.flatMap { turn ->
+                turn.jsonObject["parts"]!!.jsonArray.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
+            }
+            assertTrue("imageOutput=$imageOutput must retain the summary", "compressed history" in texts)
+        }
+    }
+
+    @Test
     fun `systemPromptInChat off converts mid system messages to user turns without dropping`() {
         // 默认路径：首条 system 走 systemInstruction（此处跳过），中部 SYSTEM
         // （记忆注入/userContext/世界书等）转 user 轮原位保留——曾被整体丢弃导致注入失效。

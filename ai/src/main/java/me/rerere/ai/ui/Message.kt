@@ -201,7 +201,11 @@ private const val CONTEXT_KEEP_RATIO = 0.5f
 fun List<UIMessage>.limitContext(limit: Int): List<UIMessage> {
     val checkpointIndex = indexOfLast { it.isContextCheckpoint }
     if (checkpointIndex < 0) return limitMessageCount(limit)
-    return listOf(this[checkpointIndex]) + subList(checkpointIndex + 1, size).limitMessageCount(limit)
+    // 旧摘要仍可能存成 user；只在请求副本中统一身份，保留原节点和历史内容。
+    val checkpoint = this[checkpointIndex].let {
+        if (it.role == MessageRole.SYSTEM) it else it.copy(role = MessageRole.SYSTEM)
+    }
+    return listOf(checkpoint) + subList(checkpointIndex + 1, size).limitMessageCount(limit)
 }
 
 /**

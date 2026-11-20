@@ -162,7 +162,7 @@ fun ChatMessage(
     /** 卡把开局正文写回消息的入口。 */
     cardMessagesJson: String = "[]",
 ) {
-    val message = node.messageForDisplay()
+    val message = if (node.currentMessage.isContextCheckpoint) node.currentMessage else node.messageForDisplay()
     val settings = LocalSettings.current.displaySetting
     val chatFontFamily = LocalChatFontFamily.current ?: rememberChatFontFamily(settings)
     val textStyle = LocalTextStyle.current.copy(
@@ -184,6 +184,15 @@ fun ChatMessage(
         horizontalAlignment = if (message.role == MessageRole.USER) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        if (message.isContextCheckpoint) {
+            ContextSummaryCard(
+                message = message,
+                onEdit = onEdit,
+                onMore = { showActionsSheet = true },
+                loading = loading,
+            )
+            return@Column
+        }
         if (!message.parts.isEmptyUIMessage()) {
             Row(
                 modifier = Modifier
@@ -280,7 +289,6 @@ fun ChatMessage(
         ProvideTextStyle(textStyle) {
             ChatMessageNerdLine(message = message, messageFloor = messageFloor)
         }
-
     }
     if (showActionsSheet) {
         ChatMessageActionsSheet(

@@ -706,7 +706,11 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     // 默认路径：首条 system 已进 systemInstruction，这里跳过；中部 SYSTEM
                     // （记忆注入/userContext/世界书等）转 user 轮原位保留（曾随防空回复
                     // 改造被整体丢弃，导致注入静默失效）
-                    if (imageOutput) return@forEach
+                    if (imageOutput) {
+                        // 图片请求不发送系统指令；摘要仍须按兼容对话轮保留，避免丢失历史。
+                        if (message.isContextCheckpoint) addSystemAsUserTurn(message)
+                        return@forEach
+                    }
                     if (!systemPromptInChat) {
                         if (!firstSystemSeen) {
                             firstSystemSeen = true

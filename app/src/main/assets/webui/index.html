@@ -120,6 +120,18 @@
   .context-compressed-divider::before, .context-compressed-divider::after {
     content: ''; flex: 1; height: 1px; background: var(--md-outline-variant);
   }
+  .context-summary {
+    box-sizing: border-box; padding: 16px; border-radius: 12px;
+    background: var(--md-surface-container); color: var(--md-on-surface);
+  }
+  .context-summary summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+  .summary-label { margin: 8px 0; color: var(--md-on-surface-variant); font-size: 12px; }
+  .summary-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
+  .summary-ops { display: flex; justify-content: flex-end; gap: 8px; }
+  .summary-ops button {
+    border: 0; border-radius: 8px; padding: 8px 12px; background: transparent;
+    color: var(--md-primary); font: inherit; cursor: pointer;
+  }
   /* 新消息入场：对齐原生 AnimatedVisibility 的上滑淡入 */
   .row.enter { animation: rowIn .22s cubic-bezier(.2, 0, 0, 1); }
   @keyframes rowIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

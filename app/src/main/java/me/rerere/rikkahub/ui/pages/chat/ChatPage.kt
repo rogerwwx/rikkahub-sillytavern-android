@@ -122,6 +122,7 @@ import me.rerere.rikkahub.ui.components.ai.ChatAttachmentPickerActions
 import me.rerere.rikkahub.ui.components.ai.ChatInput
 import me.rerere.rikkahub.ui.components.message.ChatMessageActionsSheet
 import me.rerere.rikkahub.ui.components.message.ChatMessageCopySheet
+import me.rerere.rikkahub.ui.components.message.ContextSummaryEditor
 import me.rerere.rikkahub.ui.components.ui.ErrorCardsDisplay
 import me.rerere.rikkahub.ui.components.ui.ImagePreviewDialog
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
@@ -469,6 +470,30 @@ private fun ChatPageContent(
     }
 
     TTSAutoPlay(vm = vm, setting = setting, conversation = conversation)
+
+    var editingSummaryId by remember(conversation.id) { mutableStateOf<Uuid?>(null) }
+    val editMessage: (UIMessage) -> Unit = { message ->
+        if (message.isContextCheckpoint) {
+            editingSummaryId = message.id
+        } else {
+            inputState.setContents(message.parts)
+            inputState.editingMessage = message.id
+        }
+    }
+    editingSummaryId?.let { messageId ->
+        conversation.getMessageNodeByMessageId(messageId)?.messages
+            ?.firstOrNull { it.id == messageId && it.isContextCheckpoint }?.let { message ->
+                ContextSummaryEditor(
+                    message = message,
+                    savingEnabled = loadingJob == null,
+                    onSave = { text ->
+                        vm.handleMessageEdit(listOf(UIMessagePart.Text(text)), message.id)
+                        editingSummaryId = null
+                    },
+                    onDismiss = { editingSummaryId = null },
+                )
+            }
+    }
 
     Surface(
         color = setting.displaySetting.chatBackgroundColor?.toComposeColor()
@@ -898,8 +923,7 @@ private fun ChatPageContent(
                         } ?: currentChatModel,
                         onDelete = { vm.deleteMessage(message) },
                         onEdit = {
-                            inputState.setContents(message.parts)
-                            inputState.editingMessage = message.id
+                            editMessage(message)
                         },
                         onShare = {
                             val text = message.parts.filterIsInstance<me.rerere.ai.ui.UIMessagePart.Text>()
@@ -1595,8 +1619,7 @@ private fun ChatPageContent(
                                     }
 
                                     "edit" -> {
-                                        inputState.setContents(message.parts)
-                                        inputState.editingMessage = message.id
+                                        editMessage(message)
                                     }
                                     "reasoning_menu" -> webReasoningMenuId = message.id
 
@@ -1721,8 +1744,7 @@ private fun ChatPageContent(
                     inputState.setMessageText(msg.toText())
                 },
                 onEdit = { msg ->
-                    inputState.setContents(msg.parts)
-                    inputState.editingMessage = msg.id
+                    editMessage(msg)
                 },
                 onEditReasoning = { message, text -> vm.handleMessageReasoningEdit(text, message.id) },
                 onForkMessage = { msg ->

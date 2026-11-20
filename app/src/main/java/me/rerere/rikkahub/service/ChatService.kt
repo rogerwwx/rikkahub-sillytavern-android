@@ -3152,7 +3152,11 @@ class ChatService(
         val settings = settingsStore.awaitLoaded()
         val assistant = settings.getAssistantById(currentConversation.assistantId)
             ?: settings.getCurrentAssistant()
-        val processedParts = preprocessUserInputParts(parts, assistant, settings)
+        val originalMessage = currentConversation.getMessageNodeByMessageId(messageId)
+            ?.messages?.firstOrNull { it.id == messageId } ?: return
+        // 摘要编辑保留原文，不经过用户输入的宏替换和正则预处理。
+        val processedParts = if (originalMessage.isContextCheckpoint) parts
+            else preprocessUserInputParts(parts, assistant, settings)
         var edited = false
 
         val updatedNodes = currentConversation.messageNodes.map { node ->
@@ -3166,7 +3170,7 @@ class ChatService(
                 // 摘要原地改写：新建分支会丢掉检查点标记，删除摘要时还会露出旧版本。
                 return@map node.copy(
                     messages = node.messages.map { message ->
-                        if (message.id == messageId) message.copy(parts = processedParts) else message
+                        if (message.id == messageId) message.copy(role = MessageRole.SYSTEM, parts = processedParts) else message
                     }
                 )
             }

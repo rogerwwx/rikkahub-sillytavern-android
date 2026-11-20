@@ -846,7 +846,8 @@ private fun ChatListNormal(
                 show = isRecentScroll && !state.isScrollInProgress && settings.displaySetting.showMessageJumper && !captureProgress,
                 onLeft = settings.displaySetting.messageJumperOnLeft,
                 scope = scope,
-                state = state
+                state = state,
+                compressedPrefixSize = compressedPrefixCount,
             )
 
             // Suggestion
@@ -1102,7 +1103,8 @@ private fun BoxScope.MessageJumper(
     show: Boolean,
     onLeft: Boolean,
     scope: CoroutineScope,
-    state: LazyListState
+    state: LazyListState,
+    compressedPrefixSize: Int,
 ) {
     AnimatedVisibility(
         visible = show,
@@ -1121,7 +1123,11 @@ private fun BoxScope.MessageJumper(
             Surface(
                 onClick = {
                     scope.launch {
-                        state.scrollToItem(0)
+                        state.scrollToItem(topJumpTarget(
+                            state.firstVisibleItemIndex,
+                            state.firstVisibleItemScrollOffset,
+                            compressedPrefixSize,
+                        ))
                     }
                 },
                 shape = CircleShape,

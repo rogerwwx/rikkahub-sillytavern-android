@@ -191,8 +191,23 @@ class MessageContextLimitTest {
         assertEquals(messages.subList(24, 30), messages.limitContext(10))
     }
 
+    @Test
+    fun `legacy user checkpoint is sent as system without rewriting stored history`() {
+        val checkpoint = UIMessage.user("summary").copy(isContextCheckpoint = true)
+        val tail = UIMessage.user("current question")
+        val result = listOf(checkpoint, tail).limitContext(0)
+
+        assertEquals(MessageRole.SYSTEM, result.first().role)
+        assertEquals(checkpoint.id, result.first().id)
+        assertEquals(checkpoint.parts, result.first().parts)
+        assertEquals(tail, result.last())
+        assertEquals(MessageRole.USER, checkpoint.role)
+    }
+
     private fun List<UIMessage>.withCheckpointsAt(vararg indices: Int): List<UIMessage> =
-        mapIndexed { index, message -> message.copy(isContextCheckpoint = index in indices) }
+        mapIndexed { index, message ->
+            if (index in indices) message.copy(role = MessageRole.SYSTEM, isContextCheckpoint = true) else message
+        }
 
     private fun createTestMessages(count: Int): List<UIMessage> = List(count) { index ->
         UIMessage(

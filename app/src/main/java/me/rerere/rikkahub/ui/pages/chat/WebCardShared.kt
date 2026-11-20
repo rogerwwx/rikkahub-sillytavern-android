@@ -365,7 +365,9 @@ internal fun buildMessage(
         put("nodeId", JsonPrimitive(nodeId))
         put("id", message.id.toString())
         messageFloor?.let { put("floor", it) }
-        put("role", if (isUser) "user" else "assistant")
+        put("role", if (message.isContextCheckpoint) "system" else if (isUser) "user" else "assistant")
+        put("isContextCheckpoint", message.isContextCheckpoint)
+        put("isContextHidden", message.isContextHidden)
         put("name", name)
         put("avatar", avatar)
         put("time", message.createdAt.toJavaLocalDateTime().toMessageTimeString())
