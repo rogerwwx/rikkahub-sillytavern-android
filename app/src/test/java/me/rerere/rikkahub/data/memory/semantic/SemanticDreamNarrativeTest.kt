@@ -85,9 +85,33 @@ class SemanticDreamNarrativeTest {
         val legacy = settings.reflectionSystemPrompt()
         check(settings.reflectionSystemPrompt(narrativeStateEnabled = false) == legacy)
         val enabled = settings.reflectionSystemPrompt(narrativeStateEnabled = true)
-        check(enabled.startsWith(legacy) && enabled.contains("baseRevision"))
+        check(enabled.startsWith(settings.reflectionPrompt) && enabled.contains("baseRevision"))
         check(enabled.contains("最终变化") && enabled.contains("重复"))
         check(settings.reflectionSystemPrompt(narrativeStateEnabled = true, stateOnly = true).contains("changes 必须为空"))
+    }
+
+    @Test fun stateOnlyUsesDedicatedTaskAndRetainsCustomRoleConstraints() {
+        val prompt = SemanticDreamSettings().reflectionSystemPrompt(narrativeStateEnabled = true, stateOnly = true)
+        check(!prompt.contains(DEFAULT_SEMANTIC_REFLECTION_PROMPT))
+        check(!prompt.contains("重要性评分") && !prompt.contains("第一人称主观态度"))
+        check(prompt.contains("resolve") && prompt.contains("reopen") && prompt.contains("知情"))
+        val custom = SemanticDreamSettings(reflectionPrompt = "林夏称呼对方为殿下，不猜测隐情")
+            .reflectionSystemPrompt(narrativeStateEnabled = true, stateOnly = true)
+        check(custom.contains("林夏称呼对方为殿下，不猜测隐情"))
+    }
+
+    @Test fun eachModeHasOneValidFinalJsonExample() {
+        val settings = SemanticDreamSettings()
+        for ((enabled, stateOnly, updateState) in listOf(
+            Triple(false, false, true), Triple(true, false, true),
+            Triple(true, true, true), Triple(true, false, false),
+        )) {
+            val prompt = settings.reflectionSystemPrompt(enabled, stateOnly, updateState)
+            check(prompt.split("{\"changes\":").size == 2)
+            val draft = parseDreamDraft(prompt.lineSequence().last(), if (enabled) "r1" else null, stateOnly)
+            check(enabled == (draft.state != null))
+            if (enabled && !updateState) check(draft.state!!.changes.isEmpty())
+        }
     }
 
     private fun turns(count: Int): List<DreamMessage> = (0 until count).flatMap { index ->
@@ -110,6 +134,8 @@ class SemanticDreamNarrativeTest {
                 arbitraryManualRangeNeverAdvancesGlobalState()
                 openingAndIncompleteMiddleKeepStatePrefixContiguous()
                 enabledPromptAppendsProtocolEvenToCustomReflection()
+                stateOnlyUsesDedicatedTaskAndRetainsCustomRoleConstraints()
+                eachModeHasOneValidFinalJsonExample()
             }
             println("SemanticDreamNarrativeTest: PASS")
         }

@@ -222,13 +222,17 @@ fun dreamWindow(
     val context = (turns.filter { it.last().index < firstPosition }.takeLast(overlapTurns.coerceAtLeast(0)).asReversed()
         .map { turn -> turn.joinToString("\n") { "[理解材料 " + it.value.role + "] " + it.value.text } } + partial)
         .filter { it.isNotBlank() }.joinToString("\n")
-    val transcript = evidence.joinToString("\n") { source ->
-        "[新证据 id=" + source.evidenceId + " role=" + source.role + " messageDate=" +
-            (source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)) +
-            " offset=" + source.start + ":" + source.end + (if (source.isIncomplete) " state=未确认正常完成" else "") + "]\n" +
-            messages[source.position].text.substring(source.start, source.end)
-    }
+    val transcript = renderDreamTranscript(evidence, messages)
     return DreamWindow(evidence, context, transcript, mergeDreamCoverage(messages, stableCursor, evidence), selected.size)
+}
+
+internal fun renderDreamTranscript(
+    evidence: List<DreamSource>, messages: List<DreamMessage>, referenceId: (String) -> String = { it },
+): String = evidence.joinToString("\n") { source ->
+    "[新证据 id=" + referenceId(source.evidenceId) + " role=" + source.role + " messageDate=" +
+        (source.createdAtText ?: java.time.Instant.ofEpochMilli(source.createdAt)) +
+        " offset=" + source.start + ":" + source.end + (if (source.isIncomplete) " state=未确认正常完成" else "") + "]\n" +
+        messages[source.position].text.substring(source.start, source.end)
 }
 
 fun dreamExpiry(type: String, isCore: Boolean, evidenceAt: Long, ttlDays: Map<String, Int>): Long? =

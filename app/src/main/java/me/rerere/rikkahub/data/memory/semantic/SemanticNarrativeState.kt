@@ -261,10 +261,14 @@ fun planSemanticStateChanges(
         entries = rows.values.toList())).also(::validateSemanticStateCheckpoint)
 }
 
-fun renderSemanticStateForExtraction(checkpoint: SemanticStateCheckpoint): String {
+fun renderSemanticStateForExtraction(
+    checkpoint: SemanticStateCheckpoint,
+    referenceId: (String) -> String = { it },
+    baseRevision: String = checkpoint.revision,
+): String {
     validateSemanticStateCheckpoint(checkpoint)
-    val table = StateExtractionTable(checkpoint.revision, checkpoint.coveredCount, checkpoint.entries.map { entry ->
-        StateExtractionRow(entry.id, entry.version, entry.kind, entry.subject, entry.facet,
+    val table = StateExtractionTable(baseRevision, checkpoint.coveredCount, checkpoint.entries.map { entry ->
+        StateExtractionRow(referenceId(entry.id), entry.version, entry.kind, entry.subject, entry.facet,
             entry.value, entry.status, entry.reason)
     })
     return "已验证状态；只记录持续的关键约束，不记录一过性动作；主体使用全名，保留观点所属人物；" +

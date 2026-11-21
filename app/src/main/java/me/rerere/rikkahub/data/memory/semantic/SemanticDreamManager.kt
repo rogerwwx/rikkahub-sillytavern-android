@@ -351,20 +351,22 @@ class SemanticDreamManager(
             val core = if (plan.stateOnly) emptyList() else repository.list(assistantId, conversationId)
                 .filter { it.isCore && it.status == "active" }.take(config.coreBudget)
             val candidates = (recalled + core).distinctBy { it.id }
+            val references = SemanticDreamReferences(window.evidence, candidates.map { it.id }, checkpoint)
             val systemPrompt = config.dream.reflectionSystemPrompt(narrativeStateEnabled = checkpoint != null,
                 stateOnly = plan.stateOnly, updateState = plan.updateState)
             // 旧事实只用于比较，不做条数或长度截断；相关候选由召回与核心名额决定。
             val oldContext = candidates.joinToString("\n") {
                 val evidence = dreamSources(it).filter { source -> source.valid }.maxByOrNull { source -> source.createdAt }
-                "[旧事实 id=${it.id} version=${it.contentVersion} scope=${dreamMetadata(it)["scope"] ?: "unknown"} latestEvidence=${evidence?.createdAtText ?: evidence?.createdAt ?: "unknown"}] ${it.content}"
+                "[旧事实 id=${references.memoryId(it.id)} version=${it.contentVersion} scope=${dreamMetadata(it)["scope"] ?: "unknown"} latestEvidence=${evidence?.createdAtText ?: evidence?.createdAt ?: "unknown"}] ${it.content}"
             }
             val stateContext = checkpoint?.let {
-                "[剧情状态基础版本 baseRevision=${it.revision}，截至前${it.coveredCount}条原文]\n" +
-                    renderSemanticStateForExtraction(it) + "\n"
+                "[剧情状态基础版本 baseRevision=${references.baseRevision}，截至前${it.coveredCount}条原文]\n" +
+                    renderSemanticStateForExtraction(it, references::stateId, checkNotNull(references.baseRevision)) + "\n"
             }.orEmpty()
-            val input = if (plan.stateOnly) stateContext + window.transcript else
+            val transcript = renderDreamTranscript(window.evidence, snapshot.messages, references::evidenceId)
+            val input = if (plan.stateOnly) stateContext + transcript else
                 "[上一片衔接状态，仅用于理解]\n${window.nextCursor.continuity}\n[重叠原文，仅用于理解]\n${window.context}\n[相关旧记忆，仅用于比较]\n$oldContext\n" +
-                    stateContext + window.transcript
+                    stateContext + transcript
             val params = TextGenerationParams(model = model, temperature = config.dream.temperature.toFloat(),
                 reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
                 customHeaders = model.customHeaders,
@@ -372,7 +374,7 @@ class SemanticDreamManager(
             val response = usageRecorder.wrap(providerManager.getProviderByType(providerSetting),
                 UsageTag(UsageSource.MEMORY, Uuid.parse(assistantId), conversation.id))
                 .generateTextComplete(providerSetting, listOf(UIMessage.system(systemPrompt), UIMessage.user(input)), params, stream)
-            val draft = parseDreamDraft(response.message.toText(), checkpoint?.revision, plan.stateOnly)
+            val draft = references.parseDraft(response.message.toText(), plan.stateOnly)
             require(plan.updateState || draft.state?.changes.isNullOrEmpty()) { "非连续记忆窗口不能修改全局剧情状态" }
             var changed = 0
             conversationRepo.withSourceLock {
@@ -610,7 +612,8 @@ class SemanticDreamManager(
         require(selected.none { it.isCore && config.dream.protectCore }) { "核心条目受保护，请取消勾选" }
         val scopes = selected.map { dreamMetadata(it)["scope"]?.jsonPrimitive?.contentOrNull ?: "user" }.distinct()
         require(scopes.size == 1) { "不同适用范围的记忆不能合并" }
-        val input = selected.joinToString("\n") { "id=${it.id} version=${it.contentVersion} type=${it.type}: ${it.content}" }
+        val references = SemanticDreamReferences(emptyList(), selected.map { it.id })
+        val input = selected.joinToString("\n") { "id=${references.memoryId(it.id)} version=${it.contentVersion} type=${it.type}: ${it.content}" }
         val systemPrompt = config.dream.consolidationSystemPrompt()
         val settings = settingsStore.awaitLoaded()
         val stream = settings.assistants.find { it.id.toString() == assistantId }?.compressionMemoryStream
@@ -630,7 +633,9 @@ class SemanticDreamManager(
                 TextGenerationParams(model, temperature = config.dream.temperature.toFloat(),
                     reasoningLevel = ReasoningLevel.valueOf(config.dream.reasoningLevel.uppercase()),
                     customHeaders = model.customHeaders, customBody = model.customBodies.withoutMemoryOverrides(), sessionId = runId), stream)
-        val groups = Json.decodeFromString<DreamOrganizeDraft>(cleanDreamJson(response.message.toText()))
+        val groups = Json.decodeFromString<DreamOrganizeDraft>(cleanDreamJson(response.message.toText())).let { draft ->
+            draft.copy(groups = draft.groups.map { it.copy(ids = references.expandMemoryIds(it.ids)) })
+        }
         val touched = mutableSetOf<String>()
         conversationRepo.withSourceLock {
         selected.flatMap(::dreamSources).filter { it.valid }.groupBy { it.conversationId }.forEach { (id, sources) ->
