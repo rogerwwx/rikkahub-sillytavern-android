@@ -8,7 +8,9 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.MessageNode
 import java.time.Instant
+import kotlin.uuid.Uuid
 
 data class MessageSearchResult(
     val nodeId: String,
@@ -20,9 +22,9 @@ data class MessageSearchResult(
 )
 
 enum class MessageSearchSort(val orderBy: String) {
-    RELEVANCE("rank, update_at DESC"),
-    NEWEST_FIRST("update_at DESC, rank"),
-    OLDEST_FIRST("update_at ASC, rank"),
+    RELEVANCE("rank, conversation.update_at DESC"),
+    NEWEST_FIRST("conversation.update_at DESC, rank"),
+    OLDEST_FIRST("conversation.update_at ASC, rank"),
 }
 
 private const val TAG = "MessageFtsManager"
@@ -31,34 +33,36 @@ class MessageFtsManager(private val database: AppDatabase) {
 
     private val db get() = database.openHelper.writableDatabase
 
-    suspend fun indexConversation(conversation: Conversation) = withContext(Dispatchers.IO) {
+    suspend fun indexConversation(conversation: Conversation) {
         val conversationId = conversation.id.toString()
-        // 长会话只提交一次索引事务，避免逐条写入拖住来源锁；失败时保留旧索引。
         database.withTransaction {
             db.execSQL("DELETE FROM message_fts WHERE conversation_id = ?", arrayOf(conversationId))
-            conversation.messageNodes.forEach { node ->
-                node.messages.forEach { message ->
-                    val text = message.extractFtsText()
-                    if (text.isNotBlank()) {
-                        db.execSQL(
-                            "INSERT INTO message_fts(text, node_id, message_id, conversation_id, title, update_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            arrayOf(
-                                text,
-                                node.id.toString(),
-                                message.id.toString(),
-                                conversationId,
-                                conversation.title,
-                                conversation.updateAt.toEpochMilli().toString(),
-                            )
-                        )
-                    }
-                }
-            }
+            conversation.messageNodes.forEach { indexNode(conversation, it) }
         }
     }
 
-    suspend fun updateTitle(conversationId: String, title: String) = withContext(Dispatchers.IO) {
-        db.execSQL("UPDATE message_fts SET title = ? WHERE conversation_id = ?", arrayOf(title, conversationId))
+    suspend fun updateConversation(conversation: Conversation, reindexed: List<MessageNode>, deleted: List<Uuid>) {
+        if (reindexed.isEmpty() && deleted.isEmpty()) return
+        database.withTransaction {
+            (deleted + reindexed.map { it.id }).distinct().forEach { nodeId ->
+                db.execSQL("DELETE FROM message_fts WHERE conversation_id = ? AND node_id = ?",
+                    arrayOf(conversation.id.toString(), nodeId.toString()))
+            }
+            reindexed.forEach { indexNode(conversation, it) }
+        }
+    }
+
+    private fun indexNode(conversation: Conversation, node: MessageNode) {
+        node.messages.forEach { message ->
+            val text = message.ftsText()
+            if (text.isNotBlank()) {
+                db.execSQL(
+                    "INSERT INTO message_fts(text, node_id, message_id, conversation_id, title, update_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    arrayOf(text, node.id.toString(), message.id.toString(), conversation.id.toString(),
+                        conversation.title, conversation.updateAt.toEpochMilli().toString()),
+                )
+            }
+        }
     }
 
     suspend fun deleteConversation(conversationId: String) = withContext(Dispatchers.IO) {
@@ -107,20 +111,17 @@ class MessageFtsManager(private val database: AppDatabase) {
         if (assistantIds != null && assistantIds.isEmpty()) return results
         val assistantFilter = if (assistantIds != null) {
             """
-            AND EXISTS (
-                SELECT 1 FROM conversationentity AS conversation
-                WHERE conversation.id = message_fts.conversation_id
-                  AND conversation.assistant_id IN (${assistantIds.joinToString { "?" }})
-            )
+            AND conversation.assistant_id IN (${assistantIds.joinToString { "?" }})
             """.trimIndent()
         } else {
             ""
         }
         val cursor = db.query(
             """
-            SELECT node_id, message_id, conversation_id, title, update_at,
+            SELECT node_id, message_id, conversation_id, conversation.title, conversation.update_at,
                    simple_snippet(message_fts, 0, '[', ']', '...', 30) AS snippet
             FROM message_fts
+            JOIN conversationentity AS conversation ON conversation.id = message_fts.conversation_id
             WHERE text MATCH jieba_query(?)
             $assistantFilter
             ORDER BY ${sort.orderBy}
@@ -147,7 +148,7 @@ class MessageFtsManager(private val database: AppDatabase) {
     }
 }
 
-private fun UIMessage.extractFtsText(): String =
+internal fun UIMessage.ftsText(): String =
     parts.filterIsInstance<UIMessagePart.Text>()
         .joinToString("\n") { it.text }
         .take(10_000)

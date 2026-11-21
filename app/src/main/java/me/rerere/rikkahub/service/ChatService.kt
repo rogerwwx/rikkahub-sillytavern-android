@@ -3063,18 +3063,17 @@ class ChatService(
             return@withSourceLock
         }
 
-        val exists = conversationRepo.existsConversationById(conversation.id)
+        // 防线只需要归属与节点数，不再为每次保存反序列化整段历史。
+        val existing = conversationRepo.getConversationSaveMetadata(conversation.id)
+        val exists = existing != null
         if (!exists && conversation.title.isBlank() && conversation.messageNodes.isEmpty()) {
             return@withSourceLock // 新会话且为空时不保存
         }
 
-        // 一次读取复用归属和节点数，避免同一保存重复反序列化整段历史。
-        val existing = if (exists) conversationRepo.getConversationById(conversation.id) else null
-
         // 防「把对话改属主」：已有会话的 assistantId 绝不该被一次保存改掉
         // （后台触发时的空会话曾导致全部对话被改属主、消息被清空）。
         if (exists) {
-            if (existing != null && existing.assistantId != conversation.assistantId) {
+            if (existing != null && existing.assistantId != conversation.assistantId.toString()) {
                 Log.e(
                     TAG,
                     "Refusing to save conversation $conversationId: assistantId would change " +
@@ -3089,12 +3088,12 @@ class ChatService(
         // 防「节点数倒退」：分页/摘要轻量对象的 messageNodes 恒为空，
         // 直接整行写回会静默截断历史；删除走 allowShrink = true 显式声明。
         if (exists && !allowShrink) {
-            val existingNodes = existing?.messageNodes
-            if (!existingNodes.isNullOrEmpty() && conversation.messageNodes.size < existingNodes.size) {
+            val existingNodeCount = checkNotNull(existing).nodeCount
+            if (conversation.messageNodes.size < existingNodeCount) {
                 Log.e(
                     TAG,
                     "Refusing to save conversation $conversationId: node count would shrink " +
-                        "${existingNodes.size} -> ${conversation.messageNodes.size}. " +
+                        "$existingNodeCount -> ${conversation.messageNodes.size}. " +
                         "This usually means an incomplete (summary/paged) conversation object " +
                         "was written back. Pass allowShrink=true if this deletion is intentional.",
                 )

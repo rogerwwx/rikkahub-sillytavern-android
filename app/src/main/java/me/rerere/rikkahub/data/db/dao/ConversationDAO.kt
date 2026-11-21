@@ -68,6 +68,9 @@ interface ConversationDAO {
     @Query("SELECT * FROM conversationentity WHERE id = :id")
     suspend fun getConversationById(id: String): ConversationEntity?
 
+    @Query("SELECT assistant_id AS assistantId, (SELECT COUNT(*) FROM message_node WHERE conversation_id = :id) AS nodeCount FROM conversationentity WHERE id = :id")
+    suspend fun getSaveMetadata(id: String): ConversationSaveMetadata?
+
     @Query("SELECT EXISTS(SELECT 1 FROM conversationentity WHERE id = :id)")
     suspend fun existsById(id: String): Boolean
 
@@ -144,3 +147,5 @@ interface ConversationDAO {
 data class ConversationDayCount(val day: String, val count: Int)
 
 data class AssistantConversationCount(val assistantId: String, val count: Int)
+
+data class ConversationSaveMetadata(val assistantId: String, val nodeCount: Int)

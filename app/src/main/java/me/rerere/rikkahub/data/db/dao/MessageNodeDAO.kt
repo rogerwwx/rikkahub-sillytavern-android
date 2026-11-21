@@ -35,11 +35,14 @@ interface MessageNodeDAO {
     @Update
     suspend fun update(node: MessageNodeEntity)
 
+    @Query("UPDATE message_node SET node_index = :index, select_index = :selectIndex WHERE conversation_id = :conversationId AND id = :nodeId")
+    suspend fun updatePosition(conversationId: String, nodeId: String, index: Int, selectIndex: Int): Int
+
     @Query("DELETE FROM message_node WHERE conversation_id = :conversationId")
     suspend fun deleteByConversation(conversationId: String)
 
-    @Query("DELETE FROM message_node WHERE id = :nodeId")
-    suspend fun deleteById(nodeId: String)
+    @Query("DELETE FROM message_node WHERE conversation_id = :conversationId AND id = :nodeId")
+    suspend fun deleteById(conversationId: String, nodeId: String)
 
     @Query("SELECT COUNT(*) FROM message_node WHERE conversation_id = :conversationId")
     suspend fun countNodesOfConversation(conversationId: String): Int

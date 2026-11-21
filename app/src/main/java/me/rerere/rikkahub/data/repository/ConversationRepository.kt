@@ -21,6 +21,7 @@ import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
 import me.rerere.rikkahub.data.db.fts.MessageSearchSort
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
+import me.rerere.rikkahub.data.db.dao.ConversationSaveMetadata
 import me.rerere.rikkahub.data.db.dao.FavoriteDAO
 import me.rerere.rikkahub.data.db.dao.MessageNodeDAO
 import me.rerere.rikkahub.data.db.entity.ConversationEntity
@@ -44,9 +45,20 @@ class ConversationRepository(
 ) {
     private val sourceLock = Mutex()
     private val sourceRevisionCounter = java.util.concurrent.atomic.AtomicLong()
+    private data class SavedNodes(val conversationId: Uuid, val revision: Long, val nodes: List<MessageNode>)
+    private var savedNodes: SavedNodes? = null
     fun sourceRevision(): Long = sourceRevisionCounter.get()
     private suspend fun <T> withSourceMutation(block: suspend () -> T): T = withSourceLock {
-        try { block() } finally { sourceRevisionCounter.incrementAndGet() }
+        try { block() } finally {
+            val revision = sourceRevisionCounter.incrementAndGet()
+            if (savedNodes?.revision != revision) savedNodes = null
+        }
+    }
+
+    /** 只复用事务成功后的消息载荷；其他来源写入或失败均使其失效。 */
+    private fun rememberSavedNodes(conversation: Conversation) {
+        // 本次来源修订在 withSourceMutation 的 finally 中才推进。
+        savedNodes = SavedNodes(conversation.id, sourceRevision() + 1, conversation.messageNodes)
     }
     private class SourceLockContext(val repository: ConversationRepository, var owner: kotlinx.coroutines.Job? = null) : AbstractCoroutineContextElement(Key) {
         companion object Key : CoroutineContext.Key<SourceLockContext>
@@ -317,6 +329,9 @@ class ConversationRepository(
         return conversationDAO.existsById(uuid.toString())
     }
 
+    suspend fun getConversationSaveMetadata(uuid: Uuid): ConversationSaveMetadata? =
+        conversationDAO.getSaveMetadata(uuid.toString())
+
     suspend fun getMessageNodeCount(conversationId: Uuid): Int {
         return messageNodeDAO.countNodesOfConversation(conversationId.toString())
     }
@@ -332,25 +347,39 @@ class ConversationRepository(
     }
 
     suspend fun insertConversation(conversation: Conversation) = withSourceMutation {
+        val changes = conversationNodeChanges(emptyList(), conversation.messageNodes)
         database.withTransaction {
             conversationDAO.insert(
                 conversationToConversationEntity(conversation)
             )
-            saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+            saveMessageNodes(conversation.id.toString(), changes.written)
+            messageFtsManager.indexConversation(conversation)
         }
-        messageFtsManager.indexConversation(conversation)
+        rememberSavedNodes(conversation)
     }
 
     suspend fun updateConversation(conversation: Conversation) = withSourceMutation {
+        val conversationId = conversation.id.toString()
         database.withTransaction {
-            conversationDAO.update(
-                conversationToConversationEntity(conversation)
-            )
-            // 删除旧的节点，插入新的节点
-            messageNodeDAO.deleteByConversation(conversation.id.toString())
-            saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
+            val previous = checkNotNull(conversationDAO.getConversationById(conversationId)) { "保存的会话已删除" }
+            val previousNodes = savedNodes?.takeIf {
+                it.conversationId == conversation.id && it.revision == sourceRevision()
+            }?.nodes ?: loadMessageNodes(conversationId).also {
+                check(it.size == messageNodeDAO.countNodesOfConversation(conversationId)) { "消息节点读取不完整，拒绝覆盖历史" }
+            }
+            val changes = conversationNodeChanges(previousNodes, conversation.messageNodes)
+            val entity = conversationToConversationEntity(conversation)
+            if (previous != entity) conversationDAO.update(entity)
+            changes.deleted.forEach { messageNodeDAO.deleteById(conversationId, it.toString()) }
+            saveMessageNodes(conversationId, changes.written)
+            changes.positioned.forEach { position ->
+                check(messageNodeDAO.updatePosition(conversationId, position.id.toString(), position.index, position.selectIndex) == 1) {
+                    "消息节点已变化，保存失败"
+                }
+            }
+            messageFtsManager.updateConversation(conversation, changes.reindexed, changes.deleted)
         }
-        messageFtsManager.indexConversation(conversation)
+        rememberSavedNodes(conversation)
     }
 
     suspend fun deleteConversation(conversation: Conversation) = withSourceMutation {
@@ -385,10 +414,13 @@ class ConversationRepository(
         val allIds = conversationDAO.getAllIds()
         val total = allIds.size
         allIds.forEachIndexed { index, id ->
-            val entity = conversationDAO.getConversationById(id) ?: return@forEachIndexed
-            val nodes = loadMessageNodes(entity.id)
-            val conversation = conversationEntityToConversation(entity, nodes)
-            messageFtsManager.indexConversation(conversation)
+            // 同一事务读取原文并重建，避免维护任务把刚保存的新正文索引覆盖回去。
+            database.withTransaction {
+                val entity = conversationDAO.getConversationById(id) ?: return@withTransaction
+                val nodes = loadMessageNodes(entity.id)
+                val conversation = conversationEntityToConversation(entity, nodes)
+                messageFtsManager.indexConversation(conversation)
+            }
             onProgress(index + 1, total)
         }
     }
@@ -489,7 +521,6 @@ class ConversationRepository(
 
     suspend fun updateTitle(conversationId: Uuid, title: String) {
         conversationDAO.updateTitle(conversationId.toString(), title)
-        messageFtsManager.updateTitle(conversationId.toString(), title)
     }
 
     suspend fun updateCustomSystemPrompt(conversationId: Uuid, customSystemPrompt: String?) {
@@ -583,8 +614,9 @@ class ConversationRepository(
         }
     }
 
-    private suspend fun saveMessageNodes(conversationId: String, nodes: List<MessageNode>) {
-        val entities = nodes.mapIndexed { index, node ->
+    private suspend fun saveMessageNodes(conversationId: String, nodes: List<Pair<Int, MessageNode>>) {
+        if (nodes.isEmpty()) return
+        val entities = nodes.map { (index, node) ->
             MessageNodeEntity(
                 id = node.id.toString(),
                 conversationId = conversationId,
