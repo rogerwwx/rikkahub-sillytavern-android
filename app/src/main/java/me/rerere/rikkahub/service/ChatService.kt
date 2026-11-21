@@ -2822,8 +2822,29 @@ class ChatService(
      * 改写成「当时的当前助手」。
      */
     fun updateConversationState(conversationId: Uuid, update: (Conversation) -> Conversation) {
-        val current = getConversationFlow(conversationId).value
-        updateConversation(conversationId, update(current))
+        val session = sessionManager.getOrCreate(conversationId)
+        synchronized(session) {
+            updateConversation(conversationId, update(session.state.value))
+        }
+    }
+
+    /** 用户消息操作先改最新内存状态；落库等待不能延迟显示或重放旧快照。 */
+    private suspend fun updateConversationMessages(
+        conversationId: Uuid,
+        update: (Conversation) -> Conversation?,
+    ) {
+        sessionManager.withSession(conversationId) { session ->
+            val changed = synchronized(session) {
+                check(session.contentTrusted) { "会话内容尚未成功加载，无法修改消息" }
+                val current = session.state.value
+                val updated = update(current)
+                if (updated == null || updated == current) false else {
+                    updateConversation(conversationId, updated)
+                    true
+                }
+            }
+            if (changed) saveCurrentConversation(conversationId, allowShrink = true)
+        }
     }
 
     private suspend fun updateConversationMetadata(
@@ -2989,6 +3010,34 @@ class ChatService(
         allowShrink: Boolean = false,
         /** 压缩保存失败时只撤回本次发布的摘要；普通保存沿用现有调用语义。 */
         rollbackOnFailure: Boolean = false,
+    ) {
+        val current = sessionManager.get(conversationId)?.state?.value
+        if (!rollbackOnFailure && conversation == current) {
+            saveCurrentConversation(conversationId, allowShrink)
+        } else {
+            persistConversation(conversationId, conversation, allowShrink, rollbackOnFailure)
+        }
+    }
+
+    /** 拿到来源锁后再取最新状态；已显示的状态无需由保存任务重新发布。 */
+    suspend fun saveCurrentConversation(
+        conversationId: Uuid,
+        allowShrink: Boolean = false,
+    ) = conversationRepo.withSourceLock {
+        persistConversation(
+            conversationId,
+            getConversationFlow(conversationId).value,
+            allowShrink = allowShrink,
+            publishToSession = false,
+        )
+    }
+
+    private suspend fun persistConversation(
+        conversationId: Uuid,
+        conversation: Conversation,
+        allowShrink: Boolean = false,
+        rollbackOnFailure: Boolean = false,
+        publishToSession: Boolean = true,
     ) = conversationRepo.withSourceLock {
         // 防线 0（最强）：session 内容不可信就一律不写。
         //
@@ -3019,10 +3068,12 @@ class ChatService(
             return@withSourceLock // 新会话且为空时不保存
         }
 
+        // 一次读取复用归属和节点数，避免同一保存重复反序列化整段历史。
+        val existing = if (exists) conversationRepo.getConversationById(conversation.id) else null
+
         // 防「把对话改属主」：已有会话的 assistantId 绝不该被一次保存改掉
         // （后台触发时的空会话曾导致全部对话被改属主、消息被清空）。
         if (exists) {
-            val existing = conversationRepo.getConversationById(conversation.id)
             if (existing != null && existing.assistantId != conversation.assistantId) {
                 Log.e(
                     TAG,
@@ -3038,7 +3089,7 @@ class ChatService(
         // 防「节点数倒退」：分页/摘要轻量对象的 messageNodes 恒为空，
         // 直接整行写回会静默截断历史；删除走 allowShrink = true 显式声明。
         if (exists && !allowShrink) {
-            val existingNodes = conversationRepo.getConversationById(conversation.id)?.messageNodes
+            val existingNodes = existing?.messageNodes
             if (!existingNodes.isNullOrEmpty() && conversation.messageNodes.size < existingNodes.size) {
                 Log.e(
                     TAG,
@@ -3055,7 +3106,15 @@ class ChatService(
         val settings = settingsStore.awaitLoaded()
         val updatedConversation = conversation.bindConfig(settings).fillModelSnapshots(settings)
         val previousConversation = if (rollbackOnFailure) session?.state?.value else null
-        updateConversation(conversationId, updatedConversation)
+        if (publishToSession) {
+            updateConversation(conversationId, updatedConversation)
+        } else if (session != null) synchronized(session) {
+            // 保存补齐配置和模型快照时，也只能作用于最新消息，不能重放待保存的旧分支。
+            val current = session.state.value
+            val bound = if (current == conversation) updatedConversation
+                else current.bindConfig(settings).fillModelSnapshots(settings)
+            if (bound != current) updateConversation(conversationId, bound)
+        }
 
         try {
             if (!exists) {
@@ -3106,7 +3165,7 @@ class ChatService(
                 }.collect { /* Final translation already handled in onStreamUpdate */ }
 
                 // Save the conversation after translation is complete
-                saveConversation(conversationId, getConversationFlow(conversationId).value)
+                saveCurrentConversation(conversationId)
             } catch (e: Exception) {
                 // Clear translation field on error
                 clearTranslationField(conversationId, message.id)
@@ -3157,47 +3216,39 @@ class ChatService(
         // 摘要编辑保留原文，不经过用户输入的宏替换和正则预处理。
         val processedParts = if (originalMessage.isContextCheckpoint) parts
             else preprocessUserInputParts(parts, assistant, settings)
-        var edited = false
+        updateConversationMessages(conversationId) { current ->
+            var edited = false
+            val updatedNodes = current.messageNodes.map { node ->
+                if (!node.messages.any { it.id == messageId }) {
+                    return@map node
+                }
+                edited = true
 
-        val updatedNodes = currentConversation.messageNodes.map { node ->
-            if (!node.messages.any { it.id == messageId }) {
-                return@map node
-            }
-            edited = true
+                val original = node.messages.first { it.id == messageId }
+                if (original.isContextCheckpoint) {
+                    // 摘要原地改写：新建分支会丢掉检查点标记，删除摘要时还会露出旧版本。
+                    return@map node.copy(
+                        messages = node.messages.map { message ->
+                            if (message.id == messageId) message.copy(role = MessageRole.SYSTEM, parts = processedParts) else message
+                        }
+                    )
+                }
 
-            val original = node.messages.first { it.id == messageId }
-            if (original.isContextCheckpoint) {
-                // 摘要原地改写：新建分支会丢掉检查点标记，删除摘要时还会露出旧版本。
-                return@map node.copy(
-                    messages = node.messages.map { message ->
-                        if (message.id == messageId) message.copy(role = MessageRole.SYSTEM, parts = processedParts) else message
-                    }
+                node.copy(
+                    messages = node.messages + UIMessage(
+                        role = node.role,
+                        parts = processedParts,
+                        // 编辑的是原消息的内容，来源仍是生成它的模型
+                        modelId = original.modelId,
+                        modelSnapshot = original.modelSnapshot,
+                        isContextHidden = original.isContextHidden,
+                    ),
+                    selectIndex = node.messages.size
                 )
             }
 
-            node.copy(
-                messages = node.messages + UIMessage(
-                    role = node.role,
-                    parts = processedParts,
-                    // 编辑的是原消息的内容，来源仍是生成它的模型
-                    modelId = original.modelId,
-                    modelSnapshot = original.modelSnapshot,
-                    isContextHidden = original.isContextHidden,
-                ),
-                selectIndex = node.messages.size
-            )
+            if (edited) current.copy(messageNodes = updatedNodes) else null
         }
-
-        if (!edited) return
-
-        // 用户主动删除消息：节点变少是预期行为，显式放行。
-        // 不传 allowShrink 会被「节点数不得变少」的防线拦下，表现是
-        // 界面上消息消失了、重启后又回来——那是另一种 bug。
-        saveConversation(
-            conversationId,
-            currentConversation.copy(messageNodes = updatedNodes),
-            allowShrink = true,
-        )
     }
 
     suspend fun editMessageReasoning(
@@ -3205,10 +3256,10 @@ class ChatService(
         messageId: Uuid,
         text: String,
     ) {
-        val conversation = getConversationFlow(conversationId).value
-        val updatedNodes = conversation.messageNodes.map { it.withEditedReasoning(messageId, text) }
-        if (updatedNodes == conversation.messageNodes) return
-        saveConversation(conversationId, conversation.copy(messageNodes = updatedNodes))
+        updateConversationMessages(conversationId) { current ->
+            val updatedNodes = current.messageNodes.map { it.withEditedReasoning(messageId, text) }
+            current.copy(messageNodes = updatedNodes)
+        }
     }
 
     suspend fun forkConversationAtMessage(
@@ -3255,34 +3306,28 @@ class ChatService(
         nodeId: Uuid,
         selectIndex: Int
     ) {
-        val currentConversation = getConversationFlow(conversationId).value
-        val targetNode = currentConversation.messageNodes.firstOrNull { it.id == nodeId }
-            ?: throw NotFoundException("Message node not found")
+        updateConversationMessages(conversationId) { currentConversation ->
+            val targetNode = currentConversation.messageNodes.firstOrNull { it.id == nodeId }
+                ?: throw NotFoundException("Message node not found")
 
-        if (selectIndex !in targetNode.messages.indices) {
-            throw BadRequestException("Invalid selectIndex")
-        }
-
-        if (targetNode.selectIndex == selectIndex) {
-            return
-        }
-
-        val updatedNodes = currentConversation.messageNodes.map { node ->
-            if (node.id == nodeId) {
-                node.copy(selectIndex = selectIndex)
-            } else {
-                node
+            if (selectIndex !in targetNode.messages.indices) {
+                throw BadRequestException("Invalid selectIndex")
             }
-        }
 
-        // 用户主动删除消息：节点变少是预期行为，显式放行。
-        // 不传 allowShrink 会被「节点数不得变少」的防线拦下，表现是
-        // 界面上消息消失了、重启后又回来——那是另一种 bug。
-        saveConversation(
-            conversationId,
-            currentConversation.copy(messageNodes = updatedNodes),
-            allowShrink = true,
-        )
+            if (targetNode.selectIndex == selectIndex) {
+                return@updateConversationMessages null
+            }
+
+            val updatedNodes = currentConversation.messageNodes.map { node ->
+                if (node.id == nodeId) {
+                    node.copy(selectIndex = selectIndex)
+                } else {
+                    node
+                }
+            }
+
+            currentConversation.copy(messageNodes = updatedNodes)
+        }
     }
 
     suspend fun deleteMessage(
@@ -3290,18 +3335,18 @@ class ChatService(
         messageId: Uuid,
         failIfMissing: Boolean = true,
     ) {
-        val currentConversation = getConversationFlow(conversationId).value
-        val updatedConversation = buildConversationAfterMessageDelete(currentConversation, messageId)
+        updateConversationMessages(conversationId) { currentConversation ->
+            val updatedConversation = buildConversationAfterMessageDelete(currentConversation, messageId)
 
-        if (updatedConversation == null) {
-            if (failIfMissing) {
-                throw NotFoundException("Message not found")
+            if (updatedConversation == null) {
+                if (failIfMissing) {
+                    throw NotFoundException("Message not found")
+                }
+                return@updateConversationMessages null
             }
-            return
-        }
 
-        // 用户主动删消息：节点变少是预期行为，显式放行。
-        saveConversation(conversationId, updatedConversation, allowShrink = true)
+            updatedConversation
+        }
     }
 
     suspend fun deleteMessage(
@@ -3316,13 +3361,12 @@ class ChatService(
         messageIds: Collection<Uuid>,
     ) {
         if (messageIds.isEmpty()) return
-        val currentConversation = getConversationFlow(conversationId).value
-        // 一次落盘，避免逐条保存产生中间态
-        val updatedConversation = messageIds.fold(currentConversation) { conversation, id ->
-            buildConversationAfterMessageDelete(conversation, id) ?: conversation
+        updateConversationMessages(conversationId) { currentConversation ->
+            // 一次落盘，避免逐条保存产生中间态。
+            messageIds.fold(currentConversation) { conversation, id ->
+                buildConversationAfterMessageDelete(conversation, id) ?: conversation
+            }
         }
-        if (updatedConversation == currentConversation) return
-        saveConversation(conversationId, updatedConversation, allowShrink = true)
     }
 
     private fun buildConversationAfterMessageDelete(

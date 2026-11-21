@@ -12,6 +12,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.analytics.FirebaseAnalytics
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -352,6 +353,10 @@ class ChatVM(
     fun selectMessageNode(nodeId: Uuid, selectIndex: Int) {
         viewModelScope.launch {
             runCatching { chatService.selectMessageNode(_conversationId, nodeId, selectIndex) }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    chatService.addError(error, _conversationId, title = context.getString(R.string.error_title_operation))
+                }
         }
     }
 
@@ -423,7 +428,7 @@ class ChatVM(
 
     fun saveConversationAsync() {
         viewModelScope.launch {
-            chatService.saveConversation(_conversationId, conversation.value)
+            chatService.saveCurrentConversation(_conversationId)
         }
     }
 
